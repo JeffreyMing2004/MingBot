@@ -1,5 +1,5 @@
-﻿const { registerCommand } = require('./commands');
-const { addSub, removeSub, listSub, searchUp, setCookie, getConfig, getApiStatus } = require('./bilibili');
+const { registerCommand } = require('./commands');
+const { addSub, removeSub, listSub, searchUp, setCookie, getConfig, loadBiliConfig } = require('./bilibili');
 
 registerCommand('ping', { description: '测试响应', handler: async m => { const s = Date.now(); const r = await m.reply('Pong!'); await r.edit(`Pong! ${Date.now()-s}ms`); }, aliases: ['p'] });
 registerCommand('help', { description: '显示帮助', handler: async m => { const { getAllCommands } = require('./commands'); const cmds = new Map(); for (const [,c] of getAllCommands()) if (!cmds.has(c.name)) cmds.set(c.name, c); let msg = '📋 命令列表:\n\n'; for (const [n,c] of cmds) msg += \`/\${n} - \${c.description}\n\`; await m.reply(msg); }, aliases: ['h', '?'] });

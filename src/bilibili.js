@@ -1,48 +1,32 @@
-﻿/**
- * B站动态监控模块
- * 支持多种 API 策略和第三方备用方案
- */
-const fs = require('fs');
+﻿const fs = require('fs');
 const path = require('path');
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'subscriptions.json');
-const CONFIG_BILI_FILE = path.join(DATA_DIR, 'bilibili_config.json');
+const COOKIE_FILE = path.join(__dirname, '..', 'cookie.json');
 let biliConfig = { cookie: '', userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36' };
-const RSSHUB_INSTANCES = [
-  'https://rsshub.app',
-  'https://rsshub.rssforever.com',
-  'https://rss.shab.fun',
-];
+const RSSHUB_INSTANCES = ['https://rsshub.app', 'https://rsshub.rssforever.com'];
 
 function ensureDataDir() { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); }
 function loadConfig() { ensureDataDir(); if (fs.existsSync(CONFIG_FILE)) { try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')); } catch(e) { return []; } } return []; }
 function saveConfig(data) { ensureDataDir(); fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2)); }
-function loadBiliConfig() { ensureDataDir(); if (fs.existsSync(CONFIG_BILI_FILE)) { try { const c = JSON.parse(fs.readFileSync(CONFIG_BILI_FILE, 'utf-8')); biliConfig = { ...biliConfig, ...c }; } catch(e) {} } return biliConfig; }
-function saveBiliConfig(cfg) { ensureDataDir(); biliConfig = { ...biliConfig, ...cfg }; fs.writeFileSync(CONFIG_BILI_FILE, JSON.stringify(biliConfig, null, 2)); }
+function loadCookie() { if (fs.existsSync(COOKIE_FILE)) { try { const c = JSON.parse(fs.readFileSync(COOKIE_FILE, 'utf-8')); biliConfig.cookie = c.cookie || ''; } catch(e) {} } return biliConfig.cookie; }
+function saveCookie(cookie) { const c = { cookie, description: 'B站Cookie' }; fs.writeFileSync(COOKIE_FILE, JSON.stringify(c, null, 2)); biliConfig.cookie = cookie; console.log('✅ Cookie已保存到cookie.json'); }
+function getHeaders(referer) { return { 'User-Agent': biliConfig.userAgent, 'Referer': referer || 'https://space.bilibili.com/', 'Accept': 'application/json' }; }
 
-function getHeaders(referer) {
-  const c = loadBiliConfig();
-  return { 'User-Agent': c.userAgent, 'Referer': referer || 'https://space.bilibili.com/', 'Accept': 'application/json' };
-}
-
-/**
- * 获取用户最新动态 - 多策略
- */
 async function fetchLatestDynamic(uid) {
   const uidStr = String(uid);
-  console.log(`[${uidStr}] 开始检测...`);
+  console.log(`[${uidStr}] 检测中...`);
+  loadCookie();
   
-  // 策略1: 官方 polymer API (需Cookie)
   if (biliConfig.cookie) {
     try {
-      console.log(`[${uidStr}] 策略1: 官方API...`);
-      const url = `https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid=${uidStr}`;
-      const res = await fetch(url, { headers: getHeaders(`https://space.bilibili.com/${uidStr}/dynamic`) });
+      console.log(`[${uidStr}] 使用官方API...`);
+      const res = await fetch(`https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid=${uidStr}`, { headers: getHeaders(`https://space.bilibili.com/${uidStr}/dynamic`) });
       const text = await res.text();
       if (!text.trim().startsWith('{')) throw new Error('非JSON响应');
       const data = JSON.parse(text);
-      if (data.code === -412) throw new Error('API被拦截(412)');
-      if (data.code === -799) throw new Error('请求频繁(799)');
+      if (data.code === -412) throw new Error('API被拦截，请检查Cookie是否过期');
+      if (data.code === -799) throw new Error('请求频繁，请稍后再试');
       if (data.code !== 0) throw new Error(`API错误: ${data.message}`);
       if (!data.data?.items?.length) return null;
       const item = data.data.items[0];
@@ -52,17 +36,16 @@ async function fetchLatestDynamic(uid) {
       let content = desc?.text || '';
       if (m.module_dynamic.major?.opus?.summary?.text) content = m.module_dynamic.major.opus.summary.text;
       const images = m.module_dynamic.major?.opus?.pics?.map(p => p.url) || [];
-      console.log(`[${uidStr}] 官方API成功`);
+      console.log(`[${uidStr}] 成功 - ${item.id_str}`);
       return { dynamicId: item.id_str, uid: Number(m.module_author.mid), timestamp: m.module_author.pub_ts, content: content.trim(), images, url: `https://t.bilibili.com/${item.id_str}`, name: m.module_author.name };
     } catch(e) { console.log(`[${uidStr}] 官方API失败: ${e.message}`); }
+  } else {
+    console.log(`[${uidStr}] 未配置Cookie，尝试RSSHub...`);
   }
   
-  // 策略2: RSSHub (公共实例)
-  for (const instance of RSSHUB_INSTANCES) {
+  for (const inst of RSSHUB_INSTANCES) {
     try {
-      console.log(`[${uidStr}] 策略2: ${instance}...`);
-      const url = `${instance}/bilibili/user/dynamic/${uidStr}`;
-      const res = await fetch(url, { headers: { 'User-Agent': 'RssHub/2.0', 'Accept': 'application/rss+xml' }, signal: AbortSignal.timeout(10000) });
+      const res = await fetch(`${inst}/bilibili/user/dynamic/${uidStr}`, { headers: { 'User-Agent': 'RssHub/2.0', 'Accept': 'application/rss+xml' }, signal: AbortSignal.timeout(8000) });
       if (res.status !== 200) continue;
       const text = await res.text();
       const linkMatch = text.match(/<link>([^<]+)<\/link>/);
@@ -70,32 +53,10 @@ async function fetchLatestDynamic(uid) {
       if (!linkMatch) continue;
       console.log(`[${uidStr}] RSSHub成功`);
       return { dynamicId: linkMatch[1]?.split('/').pop(), uid: Number(uidStr), timestamp: Date.now()/1000, content: titleMatch?.[1] || '', images: [], url: linkMatch[1] };
-    } catch(e) { console.log(`[${uidStr}] RSSHub失败: ${e.message.slice(0,20)}`); }
+    } catch(e) { continue; }
   }
   
-  // 策略3: 旧版API
-  try {
-    console.log(`[${uidStr}] 策略3: 旧版API...`);
-    const url = `https://api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/space_history?host_uid=${uidStr}&offset_dynamic_id=0&need_top=1&platform=web`;
-    const res = await fetch(url, { headers: getHeaders(`https://space.bilibili.com/${uidStr}`) });
-    const text = await res.text();
-    if (!text.trim().startsWith('{')) throw new Error('非JSON');
-    const data = JSON.parse(text);
-    if (data.code === -412) throw new Error('API被拦截');
-    if (!data.data?.cards?.length) return null;
-    const card = JSON.parse(data.data.cards[0].card);
-    console.log(`[${uidStr}] 旧版API成功`);
-    return {
-      dynamicId: data.data.cards[0].desc.dynamic_id_str,
-      uid: Number(uidStr),
-      timestamp: data.data.cards[0].desc.timestamp,
-      content: (card.item?.description || card.content || '').trim(),
-      images: card.item?.pictures?.map(p => p.img_src) || [],
-      url: `https://t.bilibili.com/${data.data.cards[0].desc.dynamic_id_str}`,
-    };
-  } catch(e) { console.log(`[${uidStr}] 旧版API失败: ${e.message}`); }
-  
-  console.log(`[${uidStr}] 所有策略失败，请配置Cookie或检查网络`);
+  console.log(`[${uidStr}] 所有API失败`);
   return null;
 }
 
@@ -110,8 +71,8 @@ function formatMsg(d, name) {
 
 function startMonitor(client, intervalMinutes = 5) {
   console.log(`🕐 B站监控启动 (${intervalMinutes}分钟)`);
-  loadBiliConfig();
-  if (!biliConfig.cookie) console.log('⚠️ 未配置Cookie，将尝试第三方API（成功率较低）');
+  loadCookie();
+  if (!biliConfig.cookie) console.log('⚠️ 未配置Cookie，在cookie.json中设置');
   let lastDynamics = {};
   try { const f = path.join(DATA_DIR, 'last_dynamics.json'); if (fs.existsSync(f)) lastDynamics = JSON.parse(fs.readFileSync(f, 'utf-8')); } catch(e) {}
   
@@ -156,10 +117,7 @@ function listSub(guildId) { return loadConfig().filter(s => s.guildId === guildI
 
 async function searchUp(keyword) {
   try {
-    const res = await fetch(`https://api.bilibili.com/x/web-interface/search/type?search_type=bili_user&keyword=${encodeURIComponent(keyword)}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://search.bilibili.com/' },
-      signal: AbortSignal.timeout(5000)
-    });
+    const res = await fetch(`https://api.bilibili.com/x/web-interface/search/type?search_type=bili_user&keyword=${encodeURIComponent(keyword)}`, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(5000) });
     if (!res.ok) return [];
     const data = await res.json();
     if (data.code !== 0 || !data.data?.result?.length) return [];
@@ -167,14 +125,6 @@ async function searchUp(keyword) {
   } catch(e) { return []; }
 }
 
-function setCookie(cookie) { saveBiliConfig({ cookie }); console.log('✅ Cookie已更新'); }
-function getConfig() { return loadBiliConfig(); }
-function getApiStatus() {
-  return {
-    hasCookie: biliConfig.cookie && biliConfig.cookie.length > 10,
-    cookieLength: biliConfig.cookie?.length || 0,
-    message: biliConfig.cookie ? '已配置Cookie，可使用官方API' : '未配置Cookie，将尝试第三方API（成功率较低）',
-  };
-}
+function getConfig() { return { hasCookie: !!biliConfig.cookie, cookieLength: biliConfig.cookie?.length || 0 }; }
 
-module.exports = { startMonitor, addSub, removeSub, listSub, searchUp, loadConfig, saveConfig, fetchLatestDynamic, formatMsg, setCookie, getConfig, getApiStatus };
+module.exports = { startMonitor, addSub, removeSub, listSub, searchUp, loadConfig, saveConfig, fetchLatestDynamic, formatMsg, saveCookie: saveCookie, getConfig, loadCookie: loadCookie, COOKIE_FILE };

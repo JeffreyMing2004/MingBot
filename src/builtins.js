@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 内置命令实现
  * 包含基础命令与B站动态订阅命令
  */
@@ -9,7 +9,8 @@ const {
   removeSubscription,
   getSubscriptions,
   searchUpByName,
-  loadSubscriptions,
+  setBiliCookie,
+  getBiliConfig,
 } = require('./bilibili');
 
 /**
@@ -34,8 +35,6 @@ registerCommand('help', {
   handler: async (message) => {
     const { getAllCommands } = require('./commands');
     const commands = getAllCommands();
-    
-    // 去重（因为别名会重复）
     const uniqueCommands = new Map();
     for (const [name, cmd] of commands) {
       if (!uniqueCommands.has(cmd.name)) {
@@ -44,66 +43,45 @@ registerCommand('help', {
     }
 
     let helpText = '📋 **可用命令列表**\n\n';
-    
-    // 基础命令
     helpText += '**🔧 基础命令**\n';
-    const basicCmds = ['ping', 'help', 'about', 'echo', 'time', 'random'];
-    for (const name of basicCmds) {
+    for (const name of ['ping', 'help', 'about', 'echo', 'time', 'random']) {
       const cmd = uniqueCommands.get(name);
       if (cmd) {
         helpText += `• \`/${name}\` - ${cmd.description}\n`;
-        if (cmd.aliases.length > 0) {
-          helpText += `  别名: ${cmd.aliases.map(a => `\`/${a}\``).join(', ')}\n`;
-        }
+        if (cmd.aliases.length > 0) helpText += `  别名: ${cmd.aliases.map(a => \`/\${a}\`).join(', ')}\n`;
       }
     }
-    
-    // B站监控命令
     helpText += '\n**📺 B站动态监控**\n';
-    const biliCmds = ['bili_sub', 'bili_unsub', 'bili_list', 'bili_search'];
-    for (const name of biliCmds) {
+    for (const name of ['bili_sub', 'bili_unsub', 'bili_list', 'bili_search', 'bili_cookie', 'bili_config']) {
       const cmd = uniqueCommands.get(name);
       if (cmd) {
         helpText += `• \`/${name}\` - ${cmd.description}\n`;
-        if (cmd.aliases.length > 0) {
-          helpText += `  别名: ${cmd.aliases.map(a => `\`/${a}\``).join(', ')}\n`;
-        }
+        if (cmd.aliases.length > 0) helpText += `  别名: ${cmd.aliases.map(a => \`/\${a}\`).join(', ')}\n`;
       }
     }
-    
     await message.reply(helpText.trim());
   },
   aliases: ['h', '?'],
 });
 
 /**
- * About 命令 - 关于机器人
+ * About 命令
  */
 registerCommand('about', {
   description: '显示机器人信息',
   handler: async (message) => {
-    const info = `
-🤖 **MingBot - QQ Guild Bot**
-基于 QQ Bot API v2 开发
-
-📚 **文档**: https://bot.q.qq.com/wiki/develop/api-v2/
-💡 **功能**: 频道消息、私信、成员事件、B站动态监控
-    `.trim();
-    await message.reply(info);
+    await message.reply('🤖 **MingBot**\n基于 QQ Bot API v2 + B站动态监控\n📚 https://bot.q.qq.com/wiki/develop/api-v2/');
   },
   aliases: ['info'],
 });
 
 /**
- * Echo 命令 - 复述消息
+ * Echo 命令
  */
 registerCommand('echo', {
-  description: '复述你的消息',
+  description: '复述消息',
   handler: async (message, args) => {
-    if (args.length === 0) {
-      await message.reply('用法: `/echo <要复述的内容>`');
-      return;
-    }
+    if (args.length === 0) return await message.reply('用法: `/echo <内容>`');
     await message.reply(args.join(' '));
   },
   aliases: ['say', 'repeat'],
@@ -116,17 +94,8 @@ registerCommand('time', {
   description: '显示当前时间',
   handler: async (message) => {
     const now = new Date();
-    const timeStr = now.toLocaleString('zh-CN', {
-      timeZone: 'Asia/Shanghai',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    });
-    await message.reply(`🕐 当前时间: ${timeStr}`);
+    const timeStr = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+    await message.reply(`🕐 ${timeStr}`);
   },
   aliases: ['date', 'now'],
 });
@@ -137,43 +106,24 @@ registerCommand('time', {
 registerCommand('random', {
   description: '生成随机数',
   handler: async (message, args) => {
-    let min = 0;
-    let max = 100;
-
-    if (args.length >= 1) {
-      min = parseInt(args[0]) || 0;
-    }
-    if (args.length >= 2) {
-      max = parseInt(args[1]) || 100;
-    }
-
-    if (min > max) {
-      [min, max] = [max, min];
-    }
-
+    let min = 0, max = 100;
+    if (args.length >= 1) min = parseInt(args[0]) || 0;
+    if (args.length >= 2) max = parseInt(args[1]) || 100;
+    if (min > max) [min, max] = [max, min];
     const result = Math.floor(Math.random() * (max - min + 1)) + min;
-    await message.reply(`🎲 随机数 (${min}-${max}): **${result}**`);
+    await message.reply(`🎲 ${min}-${max}: ${result}`);
   },
   aliases: ['rand', 'roll'],
 });
 
 /**
- * B站订阅命令 - 订阅UP主动态
- * 用法: /bili_sub <UP主UID或名称> [UP主UID或名称...]
+ * B站订阅命令
  */
 registerCommand('bili_sub', {
-  description: '订阅B站UP主动态推送 (支持UID或名称搜索)',
+  description: '订阅B站UP主动态推送',
   handler: async (message, args) => {
-    // 只有频道消息才能订阅
-    if (!message.guild_id) {
-      await message.reply('❌ 此命令仅支持在频道中使用');
-      return;
-    }
-    
-    if (args.length === 0) {
-      await message.reply('用法: `/bili_sub <UP主UID或名称> [更多...]`\n示例: `/bili_sub 123456` 或 `/bili_sub 灵梦`');
-      return;
-    }
+    if (!message.guild_id) return await message.reply('❌ 仅支持在频道中使用');
+    if (args.length === 0) return await message.reply('用法: `/bili_sub <UID或名称>`');
     
     const guildId = message.guild_id;
     const channelId = message.channel_id;
@@ -181,128 +131,104 @@ registerCommand('bili_sub', {
     const failed = [];
     
     for (const arg of args) {
-      // 如果是纯数字，当作UID处理
       if (/^\d+$/.test(arg)) {
         upList.push({ uid: arg, name: `UID:${arg}` });
       } else {
-        // 否则搜索UP主
         const results = await searchUpByName(arg);
-        if (results.length === 0) {
-          failed.push(arg);
-        } else if (results.length === 1) {
-          upList.push({ uid: results[0].uid, name: results[0].name });
-        } else {
-          // 多个结果，让用户选择
-          let msg = `🔍 搜索 "${arg}" 找到多个结果:\n\n`;
-          results.forEach((r, i) => {
-            msg += `${i + 1}. **${r.name}** (UID: ${r.uid})\n   简介: ${r.sign || '无'}\n\n`;
-          });
-          msg += '请使用完整UID订阅，如: `/bili_sub 123456`';
-          await message.reply(msg);
+        if (results.length === 0) failed.push(arg);
+        else if (results.length === 1) upList.push({ uid: results[0].uid, name: results[0].name });
+        else {
+          let msg = `找到多个结果，请使用UID订阅:\n`;
+          results.forEach((r, i) => msg += `${i+1}. ${r.name} (UID: ${r.uid})\n`);
+          return await message.reply(msg);
         }
       }
     }
     
-    if (failed.length > 0) {
-      await message.reply(`❌ 未找到以下UP主: ${failed.join(', ')}`);
-    }
+    if (failed.length > 0) return await message.reply(`❌ 未找到: ${failed.join(', ')}`);
+    if (upList.length === 0) return;
     
-    if (upList.length > 0) {
-      const result = addSubscription(guildId, channelId, upList);
-      const names = upList.map(u => u.name).join(', ');
-      await message.reply(`✅ 订阅成功！\n📺 频道: <#${channelId}>\n👤 UP主: ${names}\n⏰ 每5分钟检测一次更新`);
-    }
+    const result = addSubscription(guildId, channelId, upList);
+    await message.reply(`✅ 订阅成功!\n📺 <#${channelId}>\n👤 ${result.upList.map(u => u.name).join(', ')}`);
   },
-  aliases: ['bsub', 'subscribe', '订阅'],
+  aliases: ['bsub', 'subscribe'],
 });
 
 /**
- * B站取消订阅命令
- * 用法: /bili_unsub <UP主UID>
+ * B站取消订阅
  */
 registerCommand('bili_unsub', {
-  description: '取消订阅B站UP主动态',
+  description: '取消订阅B站UP主',
   handler: async (message, args) => {
-    if (!message.guild_id) {
-      await message.reply('❌ 此命令仅支持在频道中使用');
-      return;
-    }
-    
-    if (args.length === 0) {
-      await message.reply('用法: `/bili_unsub <UP主UID>`\n示例: `/bili_unsub 123456`');
-      return;
-    }
-    
-    const guildId = message.guild_id;
-    const uid = args[0];
-    
-    removeSubscription(guildId, uid);
-    await message.reply(`✅ 已取消订阅 UID: ${uid}`);
+    if (!message.guild_id) return await message.reply('❌ 仅支持在频道中使用');
+    if (args.length === 0) return await message.reply('用法: `/bili_unsub <UID>`');
+    removeSubscription(message.guild_id, args[0]);
+    await message.reply(`✅ 已取消订阅 UID: ${args[0]}`);
   },
-  aliases: ['bunsub', 'unsubscribe', '取消订阅'],
+  aliases: ['bunsub', 'unsubscribe'],
 });
 
 /**
- * B站订阅列表命令
+ * B站订阅列表
  */
 registerCommand('bili_list', {
-  description: '查看当前频道的B站动态订阅列表',
+  description: '查看订阅列表',
   handler: async (message) => {
-    if (!message.guild_id) {
-      await message.reply('❌ 此命令仅支持在频道中使用');
-      return;
-    }
-    
-    const guildId = message.guild_id;
-    const upList = getSubscriptions(guildId);
-    
-    if (upList.length === 0) {
-      await message.reply('📭 当前频道暂无B站动态订阅\n使用 `/bili_sub <UID>` 添加订阅');
-      return;
-    }
-    
-    let msg = `📋 **当前频道订阅列表** (共 ${upList.length} 个)\n\n`;
-    upList.forEach((up, i) => {
-      msg += `${i + 1}. **${up.name}** (UID: ${up.uid})\n`;
-    });
-    msg += '\n使用 `/bili_unsub <UID>` 取消订阅';
-    
+    if (!message.guild_id) return await message.reply('❌ 仅支持在频道中使用');
+    const upList = getSubscriptions(message.guild_id);
+    if (upList.length === 0) return await message.reply('📭 暂无订阅');
+    let msg = `📋 订阅列表 (${upList.length}个):\n\n`;
+    upList.forEach((up, i) => msg += `${i+1}. ${up.name} (UID: ${up.uid})\n`);
     await message.reply(msg);
   },
-  aliases: ['blist', 'sublist', '订阅列表'],
+  aliases: ['blist', 'sublist'],
 });
 
 /**
- * B站搜索UP主命令
+ * B站搜索UP主
  */
 registerCommand('bili_search', {
-  description: '搜索B站UP主 (按名称)',
+  description: '搜索B站UP主',
   handler: async (message, args) => {
-    if (args.length === 0) {
-      await message.reply('用法: `/bili_search <关键词>`\n示例: `/bili_search 灵梦`');
-      return;
-    }
-    
-    const keyword = args.join(' ');
-    const results = await searchUpByName(keyword);
-    
-    if (results.length === 0) {
-      await message.reply(`🔍 未找到 "${keyword}" 相关的UP主`);
-      return;
-    }
-    
-    let msg = `🔍 搜索 "${keyword}" 结果:\n\n`;
-    results.forEach((r, i) => {
-      msg += `${i + 1}. **${r.name}**\n`;
-      msg += `   UID: ${r.uid}\n`;
-      if (r.sign) msg += `   简介: ${r.sign.slice(0, 50)}${r.sign.length > 50 ? '...' : ''}\n`;
-      msg += '\n';
-    });
-    msg += '使用 `/bili_sub <UID>` 订阅';
-    
+    if (args.length === 0) return await message.reply('用法: `/bili_search <关键词>`');
+    const results = await searchUpByName(args.join(' '));
+    if (results.length === 0) return await message.reply('🔍 未找到');
+    let msg = `🔍 搜索结果:\n\n`;
+    results.forEach((r, i) => msg += `${i+1}. ${r.name} (UID: ${r.uid})\n`);
+    msg += '\n使用 `/bili_sub <UID>` 订阅';
     await message.reply(msg);
   },
-  aliases: ['bsearch', '搜索UP'],
+  aliases: ['bsearch'],
 });
 
-console.log('✅ 内置命令已加载 (含B站监控命令)');
+/**
+ * 设置B站Cookie
+ */
+registerCommand('bili_cookie', {
+  description: '设置B站Cookie (解决412限制)',
+  handler: async (message, args) => {
+    if (args.length === 0) return await message.reply('用法: `/bili_cookie <Cookie>`\n获取方法: 浏览器F12 -> Network -> 复制任意请求的Cookie头');
+    setBiliCookie(args.join(' '));
+    await message.reply('✅ Cookie已保存，重启后生效');
+  },
+  aliases: ['bcookie', 'cookie'],
+});
+
+/**
+ * 查看B站配置
+ */
+registerCommand('bili_config', {
+  description: '查看当前配置状态',
+  handler: async (message) => {
+    const config = getBiliConfig();
+    const hasCookie = config.cookie && config.cookie.length > 10;
+    let msg = `📊 B站配置状态:\n\n`;
+    msg += `Cookie: ${hasCookie ? '✅ 已配置' : '❌ 未配置'}\n`;
+    msg += `UserAgent: 默认\n\n`;
+    msg += '💡 使用 /bili_cookie 设置Cookie可提高成功率';
+    await message.reply(msg);
+  },
+  aliases: ['bconfig'],
+});
+
+console.log('✅ 内置命令已加载');

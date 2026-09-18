@@ -1,0 +1,24 @@
+{
+  "name": "mingbot",
+  "version": "1.0.0",
+  "description": "QQ Guild Bot template based on QQ Bot API v2",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "qq",
+    "bot",
+    "guild",
+    "qq-guild-bot"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "qq-guild-bot": "^1.0.0",
+    "ws": "^8.14.0"
+  }
+}

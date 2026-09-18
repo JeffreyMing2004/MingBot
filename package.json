@@ -1,7 +1,7 @@
 {
   "name": "mingbot",
   "version": "1.0.0",
-  "description": "QQ Guild Bot template based on QQ Bot API v2",
+  "description": "QQ Guild Bot - Bilibili Dynamic Monitor",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
@@ -11,13 +11,14 @@
   "keywords": [
     "qq",
     "bot",
-    "guild",
-    "qq-guild-bot"
+    "bilibili",
+    "monitor"
   ],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "axios": "^1.7.0",
     "qq-guild-bot": "^1.0.0",
     "ws": "^8.14.0"
   }

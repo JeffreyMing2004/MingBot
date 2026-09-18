@@ -1,12 +1,14 @@
 /**
  * QQ Guild Bot 入口文件
  * 基于 QQ Bot API v2 (https://bot.q.qq.com/wiki/develop/api-v2/)
+ * 集成 B站动态监控功能
  */
 
 const { Client, Intents, Events } = require('qq-guild-bot');
 const { config } = require('./config');
 require('./builtins'); // 加载内置命令
 const { executeCommand, getAllCommands } = require('./commands');
+const { startDynamicMonitor } = require('./bilibili');
 
 /**
  * 创建机器人客户端实例
@@ -28,6 +30,8 @@ const client = new Client({
   sandbox: config.sandbox,
 });
 
+let monitorTimer = null;
+
 /**
  * 机器人就绪事件
  */
@@ -44,6 +48,9 @@ client.on(Events.READY, (readyData) => {
     }
   }
   console.log(`📋 已加载 ${uniqueCommands.size} 个命令: ${Array.from(uniqueCommands.keys()).join(', ')}`);
+  
+  // 启动 B站动态监控 (每5分钟检测一次)
+  monitorTimer = startDynamicMonitor(client, 5);
 });
 
 /**
@@ -140,12 +147,20 @@ async function start() {
 // 优雅关闭
 process.on('SIGINT', async () => {
   console.log('\n🛑 正在关闭机器人...');
+  if (monitorTimer) {
+    clearInterval(monitorTimer);
+    console.log('🕐 B站动态监控已停止');
+  }
   await client.stop();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   console.log('\n🛑 正在关闭机器人...');
+  if (monitorTimer) {
+    clearInterval(monitorTimer);
+    console.log('🕐 B站动态监控已停止');
+  }
   await client.stop();
   process.exit(0);
 });

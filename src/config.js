@@ -1,9 +1,20 @@
-﻿/**
+/**
  * 配置文件
+ * 读取优先级: 环境变量 > config.json > 默认值
  */
+const fs = require('fs');
+const path = require('path');
+
+const CFG_PATH = path.join(__dirname, '..', 'config.json');
+let fileCfg = {};
+if (fs.existsSync(CFG_PATH)) {
+  try { fileCfg = JSON.parse(fs.readFileSync(CFG_PATH, 'utf8')); }
+  catch (e) { console.error('config.json 解析失败:', e.message); }
+}
+
 module.exports = {
-  appId: process.env.QQ_BOT_APP_ID || 'YOUR_APP_ID',
-  token: process.env.QQ_BOT_TOKEN || 'YOUR_BOT_TOKEN',
-  sandbox: process.env.QQ_BOT_SANDBOX !== 'false',
+  appId: process.env.QQ_BOT_APP_ID || fileCfg.appId || 'YOUR_APP_ID',
+  token: process.env.QQ_BOT_TOKEN || fileCfg.token || 'YOUR_BOT_TOKEN',
+  sandbox: process.env.QQ_BOT_SANDBOX !== 'false' || fileCfg.sandbox === true,
   biliCookie: process.env.BILI_COOKIE || '',
 };

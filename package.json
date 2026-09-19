@@ -19,7 +19,7 @@
   "type": "commonjs",
   "dependencies": {
     "axios": "^1.7.0",
-    "qq-guild-bot": "^1.0.0",
+    "qq-guild-sdk": "^2.0.0",
     "ws": "^8.14.0"
   }
 }

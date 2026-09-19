@@ -155,7 +155,7 @@ function formatMsg(d, upName) {
   return msg;
 }
 
-function startMonitor(client, intervalMinutes = 5) {
+function startMonitor(bot, intervalMinutes = 5) {
   console.log(`🕐 B站监控启动 (${intervalMinutes}分钟间隔)`);
   loadBiliConfig();
   if (!biliConfig.cookie) console.log('⚠️ 未配置Cookie，将尝试第三方API（成功率较低）');
@@ -173,7 +173,7 @@ function startMonitor(client, intervalMinutes = 5) {
         if (!latest) { console.log(`[${sub.name || uidStr}] 暂无动态`); continue; }
         if (latest.dynamicId !== lastDynamics[uidStr]) {
           console.log(`[${sub.name || uidStr}] 新动态: ${latest.dynamicId}`);
-          try { await client.postMessage(sub.channelId, formatMsg(latest, sub.name || uidStr)); }
+          try { await bot.send.channel(sub.channelId, formatMsg(latest, sub.name || uidStr)); }
           catch(e) { console.error('发送失败:', e.message); }
           lastDynamics[uidStr] = latest.dynamicId;
         } else {
@@ -214,4 +214,4 @@ async function searchUp(keyword) {
   } catch(e) { return []; }
 }
 
-module.exports = { startMonitor, addSub, removeSub, listSub, searchUp, loadBiliConfig, saveBiliConfig, fetchLatestDynamic, formatMsg, CONFIG_FILE, COOKIE_FILE };
+function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, searchUp, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, fetchLatestDynamic, formatMsg, CONFIG_FILE, COOKIE_FILE };

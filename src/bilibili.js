@@ -5,6 +5,7 @@ const CONFIG_FILE = path.join(DATA_DIR, 'subscriptions.json');
 const COOKIE_FILE = path.join(__dirname, '..', 'cookie.json');
 const LAST_FILE = path.join(DATA_DIR, 'last_dynamics.json');
 let biliConfig = { cookie: '', userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36' };
+const log = require('./logger');
 const RSSHUB_INSTANCES = ['https://rsshub.app', 'https://rsshub.rssforever.com'];
 
 function ensureDataDir() {
@@ -23,7 +24,7 @@ function loadBiliConfig() {
       const raw = fs.readFileSync(COOKIE_FILE, 'utf-8').replace(/^\uFEFF/, '');
       const c = JSON.parse(raw);
       biliConfig.cookie = c.cookie || '';
-    } catch(e) { console.error('读取cookie.json失败:', e.message); }
+    } catch(e) { log.error('读取cookie.json失败: ' + e.message) }
   }
   return biliConfig.cookie;
 }
@@ -31,7 +32,7 @@ function saveBiliConfig(cookie) {
   ensureDataDir();
   biliConfig.cookie = cookie;
   fs.writeFileSync(COOKIE_FILE, JSON.stringify({ cookie }, null, 2), 'utf-8');
-  console.log('Cookie已保存到cookie.json');
+  log.info('Cookie已保存到cookie.json')
 }
 function getHeaders(referer) {
   return {
@@ -129,18 +130,18 @@ async function fetchRSSHub(uid) {
 /** 获取UP主最新动态（多策略fallback） */
 async function fetchLatestDynamic(uid) {
   const uidStr = String(uid);
-  console.log(`[${uidStr}] 检测动态...`);
+  log.bili(`[${uidStr}] 检测动态...`);
   // 优先官方API
   if (biliConfig.cookie) {
     try { const r = await fetchOfficial(uid); if (r) return r; }
-    catch(e) { console.log(`[${uidStr}] 官方API失败: ${e.message}`); }
+    catch(e) { log.warn(`[${uidStr}] 官方API失败: ${e.message}`); }
   } else {
-    console.log(`[${uidStr}] 未配置Cookie，跳过官方API`);
+    log.bili(`[${uidStr}] 未配置Cookie，跳过官方API`);
   }
   // 回退RSSHub
   try { return await fetchRSSHub(uid); }
-  catch(e) { console.log(`[${uidStr}] RSSHub失败: ${e.message}`); }
-  console.log(`[${uidStr}] 所有策略失败`);
+  catch(e) { log.warn(`[${uidStr}] RSSHub失败: ${e.message}`); }
+  log.bili(`[${uidStr}] 所有策略失败`);
   return null;
 }
 
@@ -156,9 +157,9 @@ function formatMsg(d, upName) {
 }
 
 function startMonitor(bot, intervalMinutes = 5) {
-  console.log(`🕐 B站监控启动 (${intervalMinutes}分钟间隔)`);
+  log.bili(`B站监控启动 (${intervalMinutes}分钟间隔)`);
   loadBiliConfig();
-  if (!biliConfig.cookie) console.log('⚠️ 未配置Cookie，将尝试第三方API（成功率较低）');
+  if (!biliConfig.cookie) log.warn('未配置Cookie，将尝试第三方API（成功率较低）');
   let lastDynamics = {};
   try {
     if (fs.existsSync(LAST_FILE)) lastDynamics = JSON.parse(fs.readFileSync(LAST_FILE, 'utf-8'));
@@ -170,16 +171,16 @@ function startMonitor(bot, intervalMinutes = 5) {
       const uidStr = String(sub.uid);
       try {
         const latest = await fetchLatestDynamic(sub.uid);
-        if (!latest) { console.log(`[${sub.name || uidStr}] 暂无动态`); continue; }
+        if (!latest) { log.bili(`[${sub.name || uidStr}] 暂无动态`); continue; }
         if (latest.dynamicId !== lastDynamics[uidStr]) {
-          console.log(`[${sub.name || uidStr}] 新动态: ${latest.dynamicId}`);
+          log.bili(`[${sub.name || uidStr}] 新动态: ${latest.dynamicId} title="${latest.title || (latest.text && latest.text.slice(0,30))}"`);
           try { await bot.send.channel(sub.channelId, formatMsg(latest, sub.name || uidStr)); }
-          catch(e) { console.error('发送失败:', e.message); }
+          catch(e) { log.error(`发送动态到 <#${sub.channelId}> 失败: ${e.message}`); }
           lastDynamics[uidStr] = latest.dynamicId;
         } else {
-          console.log(`[${sub.name || uidStr}] 无更新`);
+          log.bili(`[${sub.name || uidStr}] 无更新`);
         }
-      } catch(e) { console.error(`[${sub.name || uidStr}] 异常:`, e.message); }
+      } catch(e) { log.error(`[${sub.name || uidStr}] 异常: ${e.message}`); }
     }
     try { fs.writeFileSync(LAST_FILE, JSON.stringify(lastDynamics, null, 2)); } catch(e) {}
   };

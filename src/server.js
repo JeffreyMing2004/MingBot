@@ -128,7 +128,8 @@ async function sendToChannel(channelId, text, msgId) {
   return res;
 }
 
-// 群聊回复：POST /v2/groups/{group_openid}/messages
+// 群聊发送：POST /v2/groups/{group_openid}/messages
+// 带 msgId 为被动回复（5分钟内），不带为主动消息（需群开启「机器人主动在群聊内发言」）
 async function sendToGroup(groupOpenid, text, msgId) {
   const token = await getAccessToken();
   const body = { content: text, msg_type: 0 };
@@ -137,7 +138,7 @@ async function sendToGroup(groupOpenid, text, msgId) {
     body.msg_seq = nextMsgSeq(msgId);
   }
   const res = await postJson(`${apiBase()}/v2/groups/${groupOpenid}/messages`, body, token);
-  log.info(`[sendToGroup] 群消息发送成功 id=${res.id || '-'}`);
+  log.info(`[sendToGroup] 群消息${msgId ? '被动回复' : '主动推送'}成功 id=${res.id || '-'}`);
   return res;
 }
 
@@ -430,4 +431,4 @@ function start(handler, port) {
   return server;
 }
 
-module.exports = { init, start, getCallbackUrl, getAccessToken, signMessage, verifySignature, deriveKeypair, setBotUser, getBotUserId: () => botConfig?._botUserId || null };
+module.exports = { init, start, getCallbackUrl, getAccessToken, signMessage, verifySignature, deriveKeypair, setBotUser, getBotUserId: () => botConfig?._botUserId || null, sendToChannel, sendToGroup, sendToC2C };

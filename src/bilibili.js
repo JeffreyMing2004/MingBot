@@ -11,9 +11,23 @@ const RSSHUB_INSTANCES = ['https://rsshub.app', 'https://rsshub.rssforever.com']
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
+// 订阅目标统一为 {targetType: 'group'|'channel', targetId}；旧数据（只有guildId/channelId）按频道处理
+function normalizeSub(s) {
+  return {
+    ...s,
+    targetType: s.targetType || (s.channelId ? 'channel' : 'group'),
+    targetId: s.targetId || s.channelId || s.groupOpenid || '',
+  };
+}
+function sameTarget(a, b) {
+  return a.targetType === b.targetType && a.targetId === b.targetId;
+}
+function targetLabel(t) {
+  return t.targetType === 'group' ? `群聊 ${t.targetId}` : `频道 <#${t.targetId}>`;
+}
 function loadConfig() {
   ensureDataDir();
-  if (fs.existsSync(CONFIG_FILE)) { try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')); } catch(e) { return []; } }
+  if (fs.existsSync(CONFIG_FILE)) { try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')).map(normalizeSub); } catch(e) { return []; } }
   return [];
 }
 function saveConfig(data) { ensureDataDir(); fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2)); }
@@ -167,15 +181,17 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
   const check = async () => {
     const subs = loadConfig();
     for (const sub of subs) {
-      if (!sub.uid || !sub.guildId || !sub.channelId) continue;
+      if (!sub.uid || !sub.targetId) continue;
       const uidStr = String(sub.uid);
       try {
         const latest = await fetchLatestDynamic(sub.uid);
         if (!latest) { log.bili(`[${sub.name || uidStr}] 暂无动态`); continue; }
         if (latest.dynamicId !== lastDynamics[uidStr]) {
           log.bili(`[${sub.name || uidStr}] 新动态: ${latest.dynamicId} title="${latest.title || (latest.text && latest.text.slice(0,30))}"`);
-          try { const _send = sendFn || (bot && bot.send && bot.send.channel); if (_send) { await _send(sub.channelId, formatMsg(latest, sub.name || uidStr)); } else { log.error(`[B站监控] 无可用的消息发送函数，跳过发送`); } }
-          catch(e) { log.error(`发送动态到 <#${sub.channelId}> 失败: ${e.message}`); }
+          const _send = sendFn || (bot && bot.send && bot.send.channel ? (t, text) => bot.send.channel(t.targetId, text) : null);
+          if (!_send) { log.error(`[B站监控] 无可用的消息发送函数，跳过发送`); continue; }
+          try { await _send(sub, formatMsg(latest, sub.name || uidStr)); }
+          catch(e) { log.error(`发送动态到 ${targetLabel(sub)} 失败: ${e.message}`); }
           lastDynamics[uidStr] = latest.dynamicId;
         } else {
           log.bili(`[${sub.name || uidStr}] 无更新`);
@@ -188,21 +204,22 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
   return setInterval(check, intervalMinutes * 60 * 1000);
 }
 
-function addSub(guildId, channelId, uid, name) {
+// target 形如 {targetType: 'group'|'channel', targetId}
+function addSub(target, uid, name) {
   const subs = loadConfig();
-  const exists = subs.find(s => s.guildId === guildId && String(s.uid) === String(uid));
-  if (exists) { Object.assign(exists, { guildId, channelId, uid: Number(uid), name }); }
-  else subs.push({ guildId, channelId, uid: Number(uid), name });
+  const exists = subs.find(s => sameTarget(s, target) && String(s.uid) === String(uid));
+  if (exists) { Object.assign(exists, { ...target, uid: Number(uid), name }); }
+  else subs.push({ ...target, uid: Number(uid), name });
   saveConfig(subs);
   return subs;
 }
-function removeSub(guildId, uid) {
+function removeSub(target, uid) {
   const subs = loadConfig();
-  const idx = subs.findIndex(s => s.guildId === guildId && String(s.uid) === String(uid));
+  const idx = subs.findIndex(s => sameTarget(s, target) && String(s.uid) === String(uid));
   if (idx !== -1) subs.splice(idx, 1);
   saveConfig(subs);
 }
-function listSub(guildId) { return loadConfig().filter(s => s.guildId === guildId); }
+function listSub(target) { return loadConfig().filter(s => sameTarget(s, target)); }
 async function searchUp(keyword) {
   try {
     const res = await fetch(`https://api.bilibili.com/x/web-interface/search/type?search_type=bili_user&keyword=${encodeURIComponent(keyword)}`, {

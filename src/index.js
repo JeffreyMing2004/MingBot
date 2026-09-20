@@ -29,7 +29,7 @@ bot.on('ready', async () => {
     if (!cmds.has(c.name)) cmds.set(c.name, c);
   }
   log.info(`已加载 ${cmds.size} 个命令`);
-  startMonitor(bot, 5);
+  startMonitor(null, 5, makeSendToTarget());
 });
 
 bot.on('error', err => log.error(`机器人错误: ${err.message || err}`));
@@ -57,26 +57,21 @@ async function handleMessage(message) {
   const parts = content.slice(1).split(/\s+/);
   await executeCommand(message, parts[0].toLowerCase(), parts.slice(1));
 }
+// 监控推送统一入口：群聊走主动消息（需群开启授权），频道走子频道消息
+function makeSendToTarget() {
+  return async (target, text) => {
+    if (target.targetType === 'group') return callbackServer.sendToGroup(target.targetId, text);
+    return callbackServer.sendToChannel(target.targetId, text);
+  };
+}
+
 async function start() {
+  // 两种模式都要 init：监控的群聊/频道推送复用 server.js 的 HTTP 发送函数
+  callbackServer.init(config, config.token);
   if (useCallback) {
-    callbackServer.init(config, config.token);
     setReplyFn((msg, text) => msg.reply(text));
     callbackServer.start(handleMessage, process.env.BOT_PORT);
-    // B站监控推送：频道发消息接口没有 /v2 前缀（/v2 是群聊/单聊专用）
-    const apiBase = config.sandbox ? 'https://sandbox.api.sgroup.qq.com' : 'https://api.sgroup.qq.com';
-    const axios = require('axios');
-    const { getAccessToken } = callbackServer;
-    const sendToChannel = async (channelId, text) => {
-      try {
-        const token = await getAccessToken();
-        await axios.post(
-          `${apiBase}/channels/${channelId}/messages`,
-          { content: text },
-          { headers: { Authorization: `QQBot ${token}`, 'Content-Type': 'application/json' }, timeout: 10000 }
-        );
-      } catch(e) { log.error(`[BILI] 发送失败: ${e.message}`); }
-    };
-    startMonitor(null, 5, sendToChannel);
+    startMonitor(null, 5, makeSendToTarget());
     return;
   }
 

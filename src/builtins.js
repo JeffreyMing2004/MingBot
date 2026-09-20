@@ -201,15 +201,24 @@ registerCommand('messages', {
   aliases: ['msg', 'history'],
 });
 
+// 从消息推导订阅目标：群聊用 group_openid，频道用 channel_id
+function getTarget(m) {
+  if (m.groupOpenid) return { targetType: 'group', targetId: m.groupOpenid, label: '本群' };
+  if (m.channelId) return { targetType: 'channel', targetId: m.channelId, label: `<#${m.channelId}>` };
+  return null;
+}
+
 registerCommand('push_status', {
   description: '查看推送状态',
   handler: async (m) => {
-    if (!m.guildId) return await reply(m, '❌ 仅频道可用');
-    const subs = listSub(m.guildId);
+    const t = getTarget(m);
+    if (!t) return await reply(m, '❌ 仅群聊或频道可用');
+    const subs = listSub(t);
     if (!subs.length) return await reply(m, '📭 暂无订阅，使用 /bili_sub 订阅UP主');
     let msg = `📊 推送状态 (${subs.length}个订阅)：\n\n`;
     subs.forEach((s, i) => {
-      msg += `${i + 1}. ${s.name} (UID:${s.uid}) → 频道 <#${s.channelId}>\n`;
+      const dest = s.targetType === 'group' ? '本群' : `<#${s.targetId}>`;
+      msg += `${i + 1}. ${s.name} (UID:${s.uid}) → ${dest}\n`;
     });
     await reply(m, msg);
   },
@@ -221,9 +230,10 @@ registerCommand('push_status', {
 registerCommand('bili_sub', {
   description: '订阅B站UP主动态',
   handler: async (m, a) => {
-    if (!m.guildId) return await reply(m, '❌ 仅频道可用');
+    const t = getTarget(m);
+    if (!t) return await reply(m, '❌ 仅群聊或频道可用');
     if (!a.length) return await reply(m, '用法: /bili_sub <UID或名称>');
-    const g = m.guildId, ch = m.channelId, subs = [];
+    const subs = [];
     for (const arg of a) {
       if (/^\d+$/.test(arg)) {
         subs.push({ uid: arg, name: `UID:${arg}` });
@@ -240,8 +250,11 @@ registerCommand('bili_sub', {
       }
     }
     if (!subs.length) return await reply(m, '未找到匹配的UP主');
-    addSub(g, ch, subs[0].uid, subs[0].name);
-    await reply(m, `✅ 已订阅 ${subs[0].name}，有新动态将推送到 <#${ch}>`);
+    addSub(t, subs[0].uid, subs[0].name);
+    const hint = t.targetType === 'group'
+      ? '\n💡 若收不到推送，请群主/管理员在 手机QQ群设置→机器人 中开启「机器人主动在群聊内发言」'
+      : '';
+    await reply(m, `✅ 已订阅 ${subs[0].name}，有新动态将推送到${t.label}${hint}`);
   },
   aliases: ['bsub'],
 });
@@ -249,19 +262,21 @@ registerCommand('bili_sub', {
 registerCommand('bili_unsub', {
   description: '取消订阅B站UP主',
   handler: async (m, a) => {
-    if (!m.guildId) return await reply(m, '❌ 仅频道可用');
+    const t = getTarget(m);
+    if (!t) return await reply(m, '❌ 仅群聊或频道可用');
     if (!a.length) return await reply(m, '用法: /bili_unsub <UID>');
-    removeSub(m.guildId, a[0]);
+    removeSub(t, a[0]);
     await reply(m, `✅ 已取消订阅 UID:${a[0]}`);
   },
   aliases: ['bunsub'],
 });
 
 registerCommand('bili_list', {
-  description: '查看本频道订阅列表',
+  description: '查看本群/本频道订阅列表',
   handler: async (m) => {
-    if (!m.guildId) return await reply(m, '❌ 仅频道可用');
-    const subs = listSub(m.guildId);
+    const t = getTarget(m);
+    if (!t) return await reply(m, '❌ 仅群聊或频道可用');
+    const subs = listSub(t);
     if (!subs.length) return await reply(m, '📭 暂无订阅');
     let msg = `📋 订阅列表 (${subs.length}个)：\n\n`;
     subs.forEach((s, i) => { msg += `${i + 1}. ${s.name} (UID:${s.uid})\n`; });

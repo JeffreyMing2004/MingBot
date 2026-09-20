@@ -232,4 +232,19 @@ async function searchUp(keyword) {
   } catch(e) { return []; }
 }
 
-function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, searchUp, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, fetchLatestDynamic, formatMsg, CONFIG_FILE, COOKIE_FILE };
+/** 通过UID反查UP主名称（用户名片接口，需Cookie过-352风控；失败返回null，显示回退为UID:x） */
+async function getUpName(uid) {
+  if (!biliConfig.cookie) loadBiliConfig();
+  try {
+    const res = await fetch(`https://api.bilibili.com/x/web-interface/card?mid=${uid}`, {
+      headers: getHeaders(`https://space.bilibili.com/${uid}`),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.code !== 0) return null;
+    return data.data?.card?.name || null;
+  } catch (e) { return null; }
+}
+
+function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, searchUp, getUpName, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, fetchLatestDynamic, formatMsg, CONFIG_FILE, COOKIE_FILE };

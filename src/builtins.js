@@ -4,7 +4,7 @@
  */
 const axios = require('axios');
 const { registerCommand } = require('./commands');
-const { addSub, removeSub, listSub, searchUp, saveBiliConfig, getApiStatus } = require('./bilibili');
+const { addSub, removeSub, listSub, searchUp, getUpName, saveBiliConfig, getApiStatus } = require('./bilibili');
 const config = require('./config');
 const log = require('./logger');
 
@@ -250,11 +250,17 @@ registerCommand('bili_sub', {
       }
     }
     if (!subs.length) return await reply(m, '未找到匹配的UP主');
-    addSub(t, subs[0].uid, subs[0].name);
+    const sub = subs[0];
+    // 按UID订阅时反查UP主真实名称
+    if (/^\d+$/.test(String(sub.uid)) && sub.name.startsWith('UID:')) {
+      const realName = await getUpName(sub.uid);
+      if (realName) sub.name = realName;
+    }
+    addSub(t, sub.uid, sub.name);
     const hint = t.targetType === 'group'
       ? '\n💡 若收不到推送，请群主/管理员在 手机QQ群设置→机器人 中开启「机器人主动在群聊内发言」'
       : '';
-    await reply(m, `✅ 已订阅 ${subs[0].name}，有新动态将推送到${t.label}${hint}`);
+    await reply(m, `✅ 订阅成功\n🆔 UID：${sub.uid}\n👤 UP主：${sub.name}\n📥 新动态将推送到${t.label}${hint}`);
   },
   aliases: ['bsub'],
 });

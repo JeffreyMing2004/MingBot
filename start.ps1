@@ -1,5 +1,5 @@
 # MingBot Start Script
-# Usage: .\start.ps1 [start|stop|status|logs]
+# Usage: .\start.ps1 [start|callback|stop|status|logs]
 param([string]$Action = 'start')
 
 $ProjectRoot = Split-Path $MyInvocation.MyCommand.Path -Parent
@@ -12,8 +12,18 @@ $env:NO_PROXY = 'localhost,127.0.0.1,*api.sgroup.qq.com,*qq.com'
 function Write-Log { param($Msg) Write-Host ("[$(Get-Date -Format 'HH:mm:ss')] $Msg") }
 
 function Start-Bot {
+    param([bool]$UseCallback = $false)
+
     Write-Log "Starting MingBot..."
-    $env:QQ_BOT_SANDBOX = 'true'
+    if ($UseCallback) {
+        Write-Log "模式: HTTP回调"
+        $env:QQ_BOT_USE_CALLBACK = 'true'
+        $env:QQ_BOT_SANDBOX = 'true'
+        $env:BOT_PORT = '9000'
+    } else {
+        Write-Log "模式: WebSocket"
+        $env:QQ_BOT_SANDBOX = 'true'
+    }
     $env:HTTP_PROXY = ''
     $env:HTTPS_PROXY = ''
 
@@ -21,14 +31,18 @@ function Start-Bot {
     Start-Sleep -Milliseconds 500
 
     $job = Start-Job -Name $JobName -ScriptBlock {
-        param($root, $script)
+        param($root, $script, $useCallback, $botPort)
         $env:QQ_BOT_SANDBOX = 'true'
         $env:HTTP_PROXY = ''
         $env:HTTPS_PROXY = ''
         $env:NO_PROXY = 'localhost,127.0.0.1,*api.sgroup.qq.com,*qq.com'
+        if ($useCallback) {
+            $env:QQ_BOT_USE_CALLBACK = 'true'
+            $env:BOT_PORT = $botPort
+        }
         Set-Location $root
         & $script
-    } -ArgumentList $ProjectRoot, $Script
+    } -ArgumentList $ProjectRoot, $Script, $UseCallback, '9000'
 
     Start-Sleep -Seconds 4
     $state = (Get-Job -Id $job.Id -ErrorAction SilentlyContinue).State
@@ -84,9 +98,10 @@ function Show-Logs {
 }
 
 switch ($Action) {
-    'start'  { Start-Bot }
-    'stop'   { Stop-Bot }
-    'status' { Show-Status }
-    'logs'   { Show-Logs }
-    default  { Write-Host "Usage: .\start.ps1 [start|stop|status|logs]"; exit 1 }
+    'start'    { Start-Bot -UseCallback $false }
+    'callback' { Start-Bot -UseCallback $true  }
+    'stop'     { Stop-Bot  }
+    'status'   { Show-Status }
+    'logs'     { Show-Logs }
+    default    { Write-Host "Usage: .\start.ps1 [start|callback|stop|status|logs]"; exit 1 }
 }

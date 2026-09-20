@@ -156,7 +156,7 @@ function formatMsg(d, upName) {
   return msg;
 }
 
-function startMonitor(bot, intervalMinutes = 5) {
+function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
   log.bili(`B站监控启动 (${intervalMinutes}分钟间隔)`);
   loadBiliConfig();
   if (!biliConfig.cookie) log.warn('未配置Cookie，将尝试第三方API（成功率较低）');
@@ -174,7 +174,7 @@ function startMonitor(bot, intervalMinutes = 5) {
         if (!latest) { log.bili(`[${sub.name || uidStr}] 暂无动态`); continue; }
         if (latest.dynamicId !== lastDynamics[uidStr]) {
           log.bili(`[${sub.name || uidStr}] 新动态: ${latest.dynamicId} title="${latest.title || (latest.text && latest.text.slice(0,30))}"`);
-          try { await bot.send.channel(sub.channelId, formatMsg(latest, sub.name || uidStr)); }
+          try { const _send = sendFn || (bot && bot.send && bot.send.channel); if (_send) { await _send(sub.channelId, formatMsg(latest, sub.name || uidStr)); } else { log.error(`[B站监控] 无可用的消息发送函数，跳过发送`); } }
           catch(e) { log.error(`发送动态到 <#${sub.channelId}> 失败: ${e.message}`); }
           lastDynamics[uidStr] = latest.dynamicId;
         } else {

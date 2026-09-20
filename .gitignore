@@ -42,3 +42,8 @@ remove_*.ps1
 .pm2/
 .pnpm-store/
 .npm-cache/
+
+# Temp working dirs (contain local config copies with secrets)
+.git.tmp/
+.git-work/
+temp_push/

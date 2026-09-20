@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 命令处理器（内置命令）
  * 使用 message.reply(text) 发送回复，兼容 WebSocket 和 HTTP 回调两种模式
  */
@@ -13,19 +13,23 @@ let replyFn = null;
 function setReplyFn(fn) { replyFn = fn; }
 
 // 包装 reply：如果消息对象自带 _sendReply 就用它，否则用全局 replyFn
-function reply(message, text) {
-  if (message._sendReply) return message._sendReply(text);
-  if (replyFn) return replyFn(message, text);
+async function reply(message, text) {  try {
+  if (message._sendReply) return await message._sendReply(text);
+  if (replyFn) return await replyFn(message, text);
   throw new Error('没有可用的消息发送函数');
+  } catch (e) {
+    console.error('[reply] Error:', e.message);
+    throw e;
+  }
 }
 
 /** 获取 access_token */
 async function getAccessToken() {
   const data = JSON.stringify({
-    appid: config.appId,
-    client_secret: config.token,
+    appId: config.appId,
+    clientSecret: config.token,
   });
-  const res = await axios.post('https://api.sgroup.qq.com/oauth/access_token', data, {
+  const res = await axios.post('https://api.bot.qq.com/app/getAppAccessToken', data, {
     headers: { 'Content-Type': 'application/json' },
     timeout: 10000,
   });
@@ -36,7 +40,7 @@ async function getAccessToken() {
 async function sendToChannel(channelId, text) {
   const token = await getAccessToken();
   await axios.post(
-    `https://sandbox.api.sgroup.qq.com/v2/channels/${channelId}/messages`,
+    `https://api.sgroup.qq.com/channels/${channelId}/messages`,
     { content: text, msg_type: 0 },
     { headers: { Authorization: `QQBot ${token}`, 'Content-Type': 'application/json' }, timeout: 10000 }
   );
@@ -115,7 +119,7 @@ registerCommand('group', {
     if (!m.guildId) return await reply(m, '❌ 仅频道可用');
     try {
       const token = await getAccessToken();
-      const res = await axios.get(`https://sandbox.api.sgroup.qq.com/v2/guilds/${m.guildId}`, {
+      const res = await axios.get(`https://api.sgroup.qq.com/guilds/${m.guildId}`, {
         headers: { Authorization: `QQBot ${token}` },
         timeout: 10000,
       });
@@ -141,7 +145,7 @@ registerCommand('members', {
     const limit = Math.min(Math.max(parseInt(a[0]) || 20, 1), 100);
     try {
       const token = await getAccessToken();
-      const res = await axios.get(`https://sandbox.api.sgroup.qq.com/v2/guilds/${m.guildId}/members`, {
+      const res = await axios.get(`https://api.sgroup.qq.com/guilds/${m.guildId}/members`, {
         params: { limit },
         headers: { Authorization: `QQBot ${token}` },
         timeout: 10000,
@@ -172,7 +176,7 @@ registerCommand('messages', {
     try {
       const token = await getAccessToken();
       const res = await axios.get(
-        `https://sandbox.api.sgroup.qq.com/v2/channels/${m.channelId}/messages`,
+        `https://api.sgroup.qq.com/channels/${m.channelId}/messages`,
         {
           params: { limit },
           headers: { Authorization: `QQBot ${token}` },

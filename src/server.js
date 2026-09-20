@@ -1,4 +1,4 @@
-/**
+﻿/**
  * HTTP 回调服务器
  * QQ Guild Bot 事件推送接收端，替代 WebSocket 模式
  *
@@ -11,6 +11,13 @@
  * 回调地址验证（opcode 13）：
  *   1. 消息 = event_ts + plain_token
  *   2. 用私钥签名，返回 {plain_token, signature(hex)}
+ *
+ * 消息回复接口（按事件场景区分）：
+ *   群聊 GROUP_AT_MESSAGE_CREATE → POST /v2/groups/{group_openid}/messages
+ *   单聊 C2C_MESSAGE_CREATE      → POST /v2/users/{user_openid}/messages
+ *   频道 AT/MESSAGE_CREATE       → POST /channels/{channel_id}/messages
+ *   主动推送自 2025-04-21 起停用，群聊/单聊只能带 msg_id 被动回复
+ *   （群聊 5 分钟内有效、每条消息最多回复 5 次，msg_id+msg_seq 重复会失败）
  */
 const http = require('http');
 const https = require('https');
@@ -22,8 +29,16 @@ let callbackPath = '/callback';
 let accessToken = null;
 let tokenExpireAt = 0;
 
+// 需要转成命令消息处理的事件类型
+const MESSAGE_EVENTS = new Set([
+  'GROUP_AT_MESSAGE_CREATE',   // 群聊@机器人
+  'C2C_MESSAGE_CREATE',        // 单聊
+  'AT_MESSAGE_CREATE',         // 频道@机器人
+  'MESSAGE_CREATE',            // 频道全量消息（私域）
+  'DIRECT_MESSAGE_CREATE',     // 频道私信
+]);
+
 // ─── Ed25519 密钥派生 ─────────────────────────────────────────────────────────
-// QQ 文档：seed = botSecret，若不足 32 字节则重复拼接，取前 32 字节
 function deriveKeypair(secret) {
   let seed = Buffer.from(secret);
   while (seed.length < 32) {
@@ -33,14 +48,12 @@ function deriveKeypair(secret) {
   return nacl.sign.keyPair.fromSeed(seed);
 }
 
-// 用 AppSecret 签名消息，返回 hex 字符串
 function signMessage(secret, message) {
   const kp = deriveKeypair(secret);
   const sig = nacl.sign.detached(Buffer.from(message), kp.secretKey);
   return Buffer.from(sig).toString('hex');
 }
 
-// 用 AppSecret 派生的公钥验证签名
 function verifySignature(secret, message, hexSig) {
   try {
     const kp = deriveKeypair(secret);
@@ -59,10 +72,10 @@ async function getAccessToken() {
   }
   return new Promise((resolve, reject) => {
     const data = JSON.stringify({
-      appid: botConfig.appId,
-      client_secret: botConfig.token,
+      appId: botConfig.appId,
+      clientSecret: botConfig.token,
     });
-    const req = https.request('https://api.sgroup.qq.com/oauth/access_token', {
+    const req = https.request('https://api.bot.qq.com/app/getAppAccessToken', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
     }, res => {
@@ -73,7 +86,6 @@ async function getAccessToken() {
           const json = JSON.parse(d);
           if (json.access_token) {
             accessToken = json.access_token;
-            // access_token 有效期约 2h，提前 1min 刷新
             tokenExpireAt = now + json.expires_in * 1000 - 60_000;
             resolve(accessToken);
           } else {
@@ -91,24 +103,65 @@ async function getAccessToken() {
 }
 
 // ─── 发送消息 ──────────────────────────────────────────────────────────────────
-async function sendToChannel(channelId, text) {
+// 沙箱与正式环境域名不同
+function apiBase() {
+  return botConfig?.sandbox ? 'https://sandbox.api.sgroup.qq.com' : 'https://api.sgroup.qq.com';
+}
+
+// 被动回复序号：同一 msg_id 最多回复 5 次，相同 msg_id+msg_seq 会失败，需递增
+const msgSeqMap = new Map();
+function nextMsgSeq(msgId) {
+  if (!msgId) return 1;
+  const seq = (msgSeqMap.get(msgId) || 0) + 1;
+  msgSeqMap.set(msgId, seq);
+  if (msgSeqMap.size > 500) msgSeqMap.delete(msgSeqMap.keys().next().value);
+  return seq;
+}
+
+async function sendToChannel(channelId, text, msgId) {
+  log.info(`[sendToChannel] 发送到 channel=${channelId}${msgId ? ` (被动回复 msg_id=${msgId})` : ' (主动消息)'}`);
   const token = await getAccessToken();
-  await postJson(`https://api.sgroup.qq.com/v2/channels/${channelId}/messages`, {
-    content: text,
-    msg_type: 0,  // 0=文本
-    msg_format: 0, // 0=普通文本
-  }, token);
+  const body = { content: text };
+  if (msgId) body.msg_id = msgId;
+  const res = await postJson(`${apiBase()}/channels/${channelId}/messages`, body, token);
+  log.info(`[sendToChannel] 发送成功 id=${res.id || '-'}`);
+  return res;
+}
+
+// 群聊回复：POST /v2/groups/{group_openid}/messages
+async function sendToGroup(groupOpenid, text, msgId) {
+  const token = await getAccessToken();
+  const body = { content: text, msg_type: 0 };
+  if (msgId) {
+    body.msg_id = msgId;
+    body.msg_seq = nextMsgSeq(msgId);
+  }
+  const res = await postJson(`${apiBase()}/v2/groups/${groupOpenid}/messages`, body, token);
+  log.info(`[sendToGroup] 群消息发送成功 id=${res.id || '-'}`);
+  return res;
+}
+
+// 单聊回复：POST /v2/users/{user_openid}/messages（被动回复60分钟内有效）
+async function sendToC2C(userOpenid, text, msgId) {
+  const token = await getAccessToken();
+  const body = { content: text, msg_type: 0 };
+  if (msgId) {
+    body.msg_id = msgId;
+    body.msg_seq = nextMsgSeq(msgId);
+  }
+  const res = await postJson(`${apiBase()}/v2/users/${userOpenid}/messages`, body, token);
+  log.info(`[sendToC2C] 单聊消息发送成功 id=${res.id || '-'}`);
+  return res;
 }
 
 async function sendToDms(guildId, text) {
   const token = await getAccessToken();
-  // 先获取 DMS channel_id
-  const dms = await postJson('https://api.sgroup.qq.com/v2/users/@me/guilds', {
+  const dms = await postJson(`${apiBase()}/users/@me/guilds`, {
     guild_id: guildId,
     accept_invite: false,
   }, token);
   const channelId = dms.channel_id || dms.id;
-  await sendToChannel(channelId, text);
+  return sendToChannel(channelId, text);
 }
 
 function postJson(url, body, token) {
@@ -121,13 +174,22 @@ function postJson(url, body, token) {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(data),
       },
+      timeout: 10000,
     }, res => {
       let d = '';
       res.on('data', c => d += c);
       res.on('end', () => {
-        try { resolve(JSON.parse(d)); } catch (e) { resolve({}); }
+        let json = null;
+        try { json = d ? JSON.parse(d) : null; } catch (e) { /* 响应非JSON */ }
+        const apiCode = json?.code;
+        const apiErr = apiCode != null && apiCode !== 0 && apiCode !== '0';
+        if (res.statusCode < 400 && !apiErr) return resolve(json || {});
+        // 平台错误体形如 {code, message}，必须打出来否则排查不到原因
+        const detail = json?.message || json?.msg || d || res.statusMessage || 'unknown';
+        reject(new Error(`HTTP ${res.statusCode} code=${apiCode ?? '-'} message=${detail}`));
       });
     });
+    req.on('timeout', () => req.destroy(new Error('请求超时')));
     req.on('error', reject);
     req.write(data);
     req.end();
@@ -135,44 +197,80 @@ function postJson(url, body, token) {
 }
 
 // ─── 事件转换 ──────────────────────────────────────────────────────────────────
-function isPrivateChannel(channelId) {
-  // QQ Guild 私信频道 ID 格式：c2c|{guild_id} 或 group|{guild_id}
-  return channelId && (channelId.startsWith('c2c|') || channelId.startsWith('group|'));
+// 群聊/频道消息 content 可能带 @机器人 前缀（<@!appId 或 <@appId>），命令解析前先剥离
+function stripMentionTag(content) {
+  return (content || '').replace(/^\s*<@!?\d+>\s*/, '');
+}
+
+// 事件时间可能是 RFC3339 字符串，也可能是秒级数字
+function parseTimestamp(ts) {
+  if (!ts) return 0;
+  if (/^\d+$/.test(String(ts))) return parseInt(ts, 10) * 1000;
+  const parsed = Date.parse(ts);
+  return Number.isNaN(parsed) ? 0 : parsed;
 }
 
 function transformEvent(event) {
-  const isPrivate = !event.guild_id || isPrivateChannel(event.channel_id);
-  const guildId = event.guild_id || '';
-  const channelId = event.channel_id || '';
-  return {
+  const base = {
     id: event.id,
     author: event.author,
-    content: (event.content || '').trim(),
+    member: event.member || {},
+    mentions: (event.mentions || []).map(m => m.id),
+    botId: botConfig?.appId || null,
+    _raw: event,
+  };
+
+  // 群聊@机器人：d 里只有 group_openid，没有 guild_id/channel_id/mentions
+  if (event.group_openid) {
+    const replyFn = text => sendToGroup(event.group_openid, text, event.id);
+    return {
+      ...base,
+      sourceType: 'group',
+      content: stripMentionTag(event.content).trim(),
+      guildId: '',
+      channelId: '',
+      groupOpenid: event.group_openid,
+      isPrivate: true,
+      timestamp: parseTimestamp(event.timestamp),
+      reply: replyFn,
+      _sendReply: replyFn,
+    };
+  }
+
+  // 单聊：d.author.user_openid
+  if (event.author?.user_openid) {
+    const openid = event.author.user_openid;
+    const replyFn = text => sendToC2C(openid, text, event.id);
+    return {
+      ...base,
+      sourceType: 'c2c',
+      content: (event.content || '').trim(),
+      guildId: '',
+      channelId: '',
+      c2cOpenid: openid,
+      isPrivate: true,
+      timestamp: parseTimestamp(event.timestamp),
+      reply: replyFn,
+      _sendReply: replyFn,
+    };
+  }
+
+  // 频道消息 / 频道私信：有 guild_id + channel_id
+  const guildId = event.guild_id || '';
+  const channelId = event.channel_id || '';
+  const replyFn = text => (guildId && !channelId
+    ? sendToDms(guildId, text)
+    : sendToChannel(channelId, text, event.id));
+  return {
+    ...base,
+    sourceType: 'guild',
+    content: stripMentionTag(event.content).trim(),
     guildId,
     channelId,
-    isPrivate,
-    member: event.member || {},
-    timestamp: parseInt(event.timestamp || event.create_time || 0) * 1000,
-    // 发送回复的统一接口
-    _sendReply: async text => {
-      if (isPrivate) {
-        await sendToDms(guildId, text);
-      } else {
-        await sendToChannel(channelId, text);
-      }
-    },
-    // 兼容 SDK 风格的消息对象（WebSocket 模式下的命令也能复用）
-    reply: async text => {
-      if (isPrivate) {
-        await sendToDms(guildId, text);
-      } else {
-        await sendToChannel(channelId, text);
-      }
-    },
-    // @mention 检测（回调模式下过滤非@消息）
-    mentions: (event.mentions || []).map(m => m.id),
-    // 原始数据供需要时访问
-    _raw: event,
+    isPrivate: false,
+    timestamp: parseTimestamp(event.timestamp),
+    reply: replyFn,
+    _sendReply: replyFn,
   };
 }
 
@@ -183,7 +281,6 @@ function buildVerifier(secret) {
     const tsHeader = req.headers['x-signature-timestamp'];
 
     if (sigHeader && tsHeader) {
-      // 有签名头：先读取 body，再校验
       let body = '';
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
@@ -202,7 +299,6 @@ function buildVerifier(secret) {
         res.writeHead(500); res.end('Error');
       });
     } else {
-      // 无签名头（opcode 13 验证请求可能不带签名），直接读取 body
       let body = '';
       req.on('data', chunk => { body += chunk; });
       req.on('end', () => {
@@ -235,64 +331,62 @@ function createServer(handler, secret) {
       try {
         const event = JSON.parse(body);
 
-        // ── opcode 13: 回调地址验证 ──
         if (event.op === 13) {
           log.info('[回调验证] 收到开放平台验证请求');
           const plainToken = event.d?.plain_token || '';
           const eventTs = event.d?.event_ts || '';
-
-          // 签名消息 = event_ts + plain_token
           const sig = signMessage(secret, eventTs + plainToken);
           log.info(`[回调验证] plain_token=${plainToken} signature=${sig.substring(0, 16)}...`);
-
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ plain_token: plainToken, signature: sig }));
           return;
         }
 
-        // ── opcode 12: HTTP Callback ACK（平台确认收到）──
         if (event.op === 12) {
           log.info('[HTTP ACK] 平台已确认收到事件');
           res.writeHead(200); res.end('');
           return;
         }
 
-        // ── opcode 0: Dispatch（普通事件）──
-        log.event(`[HTTP回调] type=${event.t || event.type || 'unknown'} guild=${event.d?.guild_id} channel=${event.d?.channel_id}`);
+        const t = event.t || event.type || '';
+        log.event(`[HTTP回调] type=${t} guild=${event.d?.guild_id} channel=${event.d?.channel_id} group=${event.d?.group_openid}`);
 
-        // READY 事件必须返回空字符串
-        if (event.t === 'READY' || event.type === 'READY') {
+        if (t === 'READY') {
+          setBotUser(event.d?.user?.id);
           log.info(`[READY] appId=${event.d?.appid || botConfig?.appId} bot=${event.d?.user?.username || 'unknown'}`);
           res.writeHead(200); res.end('');
           return;
         }
 
-        // MESSAGE_CREATE 事件
-        if (event.t === 'MESSAGE_CREATE' || event.type === 'MESSAGE_CREATE') {
-          const msg = transformEvent(event.d);
-          if (msg.author?.bot || msg.author?.system) {
-            res.writeHead(200); res.end('');
-            return;
-          }
-          // 只处理 @机器人的消息
-          if (!msg.botId) {
-            res.writeHead(200); res.end('');
-            return;
-          }
-          const isMentioned = (msg.mentions || []).includes(msg.botId);
-          if (!isMentioned) {
-            log.event(`[群消息] 未@机器人，忽略 guild=${msg.guildId} channel=${msg.channelId} user=${msg.author?.username}`);
-            res.writeHead(200); res.end('');
-            return;
-          }
-          log.event(`[群消息] @机器人 guild=${msg.guildId} channel=${msg.channelId} user=${msg.author?.username}`);
-          await handler(msg);
+        if (!MESSAGE_EVENTS.has(t)) {
+          res.writeHead(200); res.end('');
+          return;
         }
 
+        const msg = transformEvent(event.d);
+        if (msg.author?.bot || msg.author?.system) {
+          res.writeHead(200); res.end('');
+          return;
+        }
+
+        // 私域频道全量消息才需要过滤@；群聊@/频道@/单聊事件平台只在命中机器人时才推送
+        if (t === 'MESSAGE_CREATE' && botConfig?._botUserId) {
+          const mentioned = (msg.mentions || []).includes(botConfig._botUserId);
+          if (!mentioned) {
+            log.event(`[频道消息] 未@机器人，忽略 user=${msg.author?.username}`);
+            res.writeHead(200); res.end('');
+            return;
+          }
+        }
+
+        // 先 ACK 再异步处理，避免命令耗时导致平台超时重推（被动回复窗口5分钟，足够）
         res.writeHead(200); res.end('');
+        handler(msg).catch(e => log.error(`[回调处理失败] ${e.message}`));
       } catch (e) {
         log.error(`HTTP回调处理失败: ${e.message}`);
-        res.writeHead(500); res.end('Error');
+        if (!res.headersSent) {
+          res.writeHead(500); res.end('Error');
+        }
       }
     });
   });
@@ -303,7 +397,6 @@ function createServer(handler, secret) {
 function init(config, token) {
   botConfig = config;
   callbackPath = process.env.QQ_BOT_CALLBACK_PATH || '/callback';
-  // botUserId 由 READY 事件填充
   if (!botConfig._botUserId) botConfig._botUserId = null;
 }
 
@@ -317,7 +410,6 @@ function getCallbackUrl() {
 
 function start(handler, port) {
   const p = port || parseInt(process.env.BOT_PORT) || 9000;
-  // 使用 appSecret 进行签名校验（与 token 字段相同值）
   const secret = botConfig?.appSecret || botConfig?.token || '';
   const server = createServer(handler, secret);
 

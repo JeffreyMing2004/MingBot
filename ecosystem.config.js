@@ -1,29 +1,25 @@
-/**
- * PM2 进程管理器配置
- * 使用方式: npx pm2 start ecosystem.config.js
- */
+const path = require('path');
+
 module.exports = {
   apps: [{
     name: 'mingbot',
-    script: './src/index.js',
-    cwd: __dirname,
-    instances: 1,
+    script: 'src/index.js',
+    cwd: path.resolve('H:\\WorkSpace\\MingBot'),
     exec_mode: 'fork',
-    autorestart: true,
-    watch: false,
-    max_memory_restart: '1G',
     env: {
       NODE_ENV: 'production',
-    },
-    env_development: {
-      NODE_ENV: 'development',
+      QQ_BOT_USE_CALLBACK: 'true',
       QQ_BOT_SANDBOX: 'true',
+      BOT_PORT: '9000',
+      HTTP_PROXY: '',
+      HTTPS_PROXY: '',
+      NO_PROXY: 'localhost,127.0.0.1,*.api.sgroup.qq.com,*.qq.com',
     },
-    error_file: './logs/error.log',
-    out_file: './logs/out.log',
-    merge_logs: true,
-    log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
-    kill_timeout: 5000,
-    listen_timeout: 8000,
+    max_memory_restart: '512M',
+    error_file: path.resolve('H:\\WorkSpace\\MingBot', 'logs', 'pm2-error.log'),
+    out_file: path.resolve('H:\\WorkSpace\\MingBot', 'logs', 'pm2-out.log'),
+    log_date_format: 'HH:mm:ss',
+    ignore_watch: ['node_modules', 'logs', '.pm2', '.vscode', 'data', '.npm-cache', '.pnpm-store'],
+    watch: false,
   }],
 };

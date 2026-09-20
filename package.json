@@ -18,8 +18,11 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@noble/ed25519": "^3.2.0",
+    "@noble/hashes": "^2.4.0",
     "axios": "^1.7.0",
     "qq-guild-sdk": "^2.0.0",
+    "tweetnacl": "^1.0.3",
     "ws": "^8.14.0"
   }
 }

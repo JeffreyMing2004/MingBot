@@ -1,33 +1,44 @@
+# Node
 node_modules/
+package-lock.json
+
+# Binaries
+*.exe
+cf2.exe
+cloudflared.exe
+
+# Logs
+logs/
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# 配置文件（包含敏感信息）
-src/config.local.js
-.env
-.env.local
-.env.*.local
-cookie.json
-config.json
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# 运行时数据
-data/
-
-# 包管理器存储
-.pnpm-store/
-pnpm-lock.yaml
 
 # OS
 .DS_Store
 Thumbs.db
-.npm-cache/
+
+# Temp test files
+fetch_docs*.js
+fetch_webhook.js
+test*.js
+test*.ps1
+test*.mjs
+run_*.bat
+
+# Env / secrets
+config.json
+cookie.json
+
+# Data files
+data/
+
+# Cloudflare tunnel
+cloudflared.yml
+
+# Temp scripts
+fix_*.ps1
+remove_*.ps1
+
+# Build/Tool caches
+.vscode/
 .pm2/
-logs/
+.pnpm-store/
+.npm-cache/

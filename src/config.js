@@ -15,8 +15,10 @@ if (fs.existsSync(CFG_PATH)) {
 module.exports = {
   appId: process.env.QQ_BOT_APP_ID || fileCfg.appId || 'YOUR_APP_ID',
   token: process.env.QQ_BOT_TOKEN || fileCfg.appSecret || fileCfg.token || 'YOUR_BOT_TOKEN',
+  appSecret: process.env.QQ_BOT_APP_SECRET || fileCfg.appSecret || fileCfg.token || '',
   sandbox: process.env.QQ_BOT_SANDBOX !== 'false' || fileCfg.sandbox === true,
   biliCookie: process.env.BILI_COOKIE || '',
   authType: fileCfg.authType || 'bot',
   callbackUrl: process.env.BOT_URL || fileCfg.callbackUrl || 'https://bot.mingpixel.net',
+  mode: fileCfg.mode || 'websocket',
 };

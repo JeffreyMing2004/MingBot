@@ -18,7 +18,7 @@ const bot = new Bot({
   authType: config.authType || 'bot',
 });
 
-const useCallback = process.env.QQ_BOT_USE_CALLBACK === 'true';
+const useCallback = process.env.QQ_BOT_USE_CALLBACK === 'true' || config.mode === 'callback';
 
 // ─── WebSocket 模式 ───────────────────────────────────────────────────────────
 bot.on('ready', async () => {

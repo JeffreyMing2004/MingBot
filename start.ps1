@@ -1,5 +1,5 @@
 # MingBot Start Script
-# Usage: .\start.ps1 [start|callback|stop|status|logs]
+# Usage: .\start.ps1 [start|callback|tunnel|stop|status|logs]
 param([string]$Action = 'start')
 
 $ProjectRoot = Split-Path $MyInvocation.MyCommand.Path -Parent
@@ -57,6 +57,15 @@ function Start-Bot {
     }
 }
 
+function Start-Tunnel {
+    Write-Log "Starting cloudflared tunnel..."
+    Stop-Process -Name cloudflared -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+    Start-Process -FilePath 'H:\WorkSpace\MingBot\cloudflared.exe' -ArgumentList 'tunnel','--config','H:\WorkSpace\MingBot\cloudflared.yml','run','mingbot' -NoNewWindow
+    Start-Sleep -Seconds 3
+    Write-Log "Tunnel started -> https://bot.mingpixel.net/callback"
+}
+
 function Stop-Bot {
     Write-Log "Stopping MingBot..."
     $job = Get-Job -Name $JobName -ErrorAction SilentlyContinue
@@ -77,6 +86,12 @@ function Show-Status {
         Write-Host "   State: $($job.State)"
     } else {
         Write-Host "[X] MingBot not running" -ForegroundColor Red
+    }
+    $cf = Get-Process cloudflared -ErrorAction SilentlyContinue
+    if ($cf) {
+        Write-Host "[OK] cloudflared tunnel running (PID: $($cf.Id))" -ForegroundColor Green
+    } else {
+        Write-Host "[X] cloudflared tunnel not running" -ForegroundColor Red
     }
 }
 
@@ -100,8 +115,9 @@ function Show-Logs {
 switch ($Action) {
     'start'    { Start-Bot -UseCallback $false }
     'callback' { Start-Bot -UseCallback $true  }
+    'tunnel'   { Start-Tunnel }
     'stop'     { Stop-Bot  }
     'status'   { Show-Status }
     'logs'     { Show-Logs }
-    default    { Write-Host "Usage: .\start.ps1 [start|callback|stop|status|logs]"; exit 1 }
+    default    { Write-Host "Usage: .\start.ps1 [start|callback|tunnel|stop|status|logs]"; exit 1 }
 }

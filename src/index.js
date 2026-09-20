@@ -39,7 +39,7 @@ bot.on('message', async (message) => {
   const content = (message.content || '').trim();
   log.event(`[群消息] guild=${message.guildId} channel=${message.channelId} user=${message.member?.nick || message.author?.username} content="${content}"`);
   if (!content.startsWith('/')) return;
-  const parts = content.slice(1).split(/s+/);
+  const parts = content.slice(1).split(/\s+/);
   await executeCommand(message, parts[0].toLowerCase(), parts.slice(1));
 });
 
@@ -51,7 +51,7 @@ async function handleMessage(message) {
   const content = (message.content || '').trim();
   log.event(`[回调消息] guild=${message.guildId} channel=${message.channelId} user=${message.member?.nick || message.author?.username} content="${content}"`);
   if (content.startsWith('/')) {
-    await executeCommand(message, content.slice(1).split(/s+/)[0].toLowerCase(), content.slice(1).split(/s+/).slice(1));
+    await executeCommand(message, content.slice(1).split(/\s+/)[0].toLowerCase(), content.slice(1).split(/\s+/).slice(1));
   }
 }
 

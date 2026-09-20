@@ -169,6 +169,8 @@ function transformEvent(event) {
         await sendToChannel(channelId, text);
       }
     },
+    // @mention 检测（回调模式下过滤非@消息）
+    mentions: (event.mentions || []).map(m => m.id),
     // 原始数据供需要时访问
     _raw: event,
   };
@@ -272,6 +274,18 @@ function createServer(handler, secret) {
             res.writeHead(200); res.end('');
             return;
           }
+          // 只处理 @机器人的消息
+          if (!msg.botId) {
+            res.writeHead(200); res.end('');
+            return;
+          }
+          const isMentioned = (msg.mentions || []).includes(msg.botId);
+          if (!isMentioned) {
+            log.event(`[群消息] 未@机器人，忽略 guild=${msg.guildId} channel=${msg.channelId} user=${msg.author?.username}`);
+            res.writeHead(200); res.end('');
+            return;
+          }
+          log.event(`[群消息] @机器人 guild=${msg.guildId} channel=${msg.channelId} user=${msg.author?.username}`);
           await handler(msg);
         }
 
@@ -289,6 +303,12 @@ function createServer(handler, secret) {
 function init(config, token) {
   botConfig = config;
   callbackPath = process.env.QQ_BOT_CALLBACK_PATH || '/callback';
+  // botUserId 由 READY 事件填充
+  if (!botConfig._botUserId) botConfig._botUserId = null;
+}
+
+function setBotUser(user) {
+  if (botConfig) botConfig._botUserId = user?.id || null;
 }
 
 function getCallbackUrl() {
@@ -318,4 +338,4 @@ function start(handler, port) {
   return server;
 }
 
-module.exports = { init, start, getCallbackUrl, getAccessToken, signMessage, verifySignature, deriveKeypair };
+module.exports = { init, start, getCallbackUrl, getAccessToken, signMessage, verifySignature, deriveKeypair, setBotUser, getBotUserId: () => botConfig?._botUserId || null };

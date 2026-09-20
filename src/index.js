@@ -49,12 +49,17 @@ bot.on('guild-member:del',  m => log.event(`[成员退出] guild=${m.guildId} us
 // ─── HTTP 回调模式 ────────────────────────────────────────────────────────────
 async function handleMessage(message) {
   const content = (message.content || '').trim();
-  log.event(`[回调消息] guild=${message.guildId} channel=${message.channelId} user=${message.member?.nick || message.author?.username} content="${content}"`);
-  if (content.startsWith('/')) {
-    await executeCommand(message, content.slice(1).split(/\s+/)[0].toLowerCase(), content.slice(1).split(/\s+/).slice(1));
+  log.event(`[回调消息] guild=${message.guildId} channel=${message.channelId} user=${message.member?.nick || message.author?.username} mentions=${JSON.stringify(message.mentions)} content="${content}"`);
+  if (!content.startsWith('/')) return;
+  // 只响应 @了机器人的消息
+  const mentions = message.mentions || [];
+  const botId = require('./server')._botUserId || null;
+  if (botId && !mentions.includes(botId)) {
+    log.event(`[回调消息] 未@机器人，忽略`);
+    return;
   }
+  await executeCommand(message, content.slice(1).split(/\s+/)[0].toLowerCase(), content.slice(1).split(/\s+/).slice(1));
 }
-
 async function start() {
   if (useCallback) {
     callbackServer.init(config, config.token);

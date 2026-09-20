@@ -2,8 +2,11 @@
  * 命令处理器（内置命令）
  * 使用 message.reply(text) 发送回复，兼容 WebSocket 和 HTTP 回调两种模式
  */
+const axios = require('axios');
 const { registerCommand } = require('./commands');
 const { addSub, removeSub, listSub, searchUp, saveBiliConfig, getApiStatus } = require('./bilibili');
+const config = require('./config');
+const log = require('./logger');
 
 // 在命令注册前导出 setReplyFn 供 index.js 绑定发送函数
 let replyFn = null;
@@ -14,6 +17,29 @@ function reply(message, text) {
   if (message._sendReply) return message._sendReply(text);
   if (replyFn) return replyFn(message, text);
   throw new Error('没有可用的消息发送函数');
+}
+
+/** 获取 access_token */
+async function getAccessToken() {
+  const data = JSON.stringify({
+    appid: config.appId,
+    client_secret: config.token,
+  });
+  const res = await axios.post('https://api.sgroup.qq.com/oauth/access_token', data, {
+    headers: { 'Content-Type': 'application/json' },
+    timeout: 10000,
+  });
+  return res.data.access_token;
+}
+
+/** 发送消息到频道 */
+async function sendToChannel(channelId, text) {
+  const token = await getAccessToken();
+  await axios.post(
+    `https://sandbox.api.sgroup.qq.com/v2/channels/${channelId}/messages`,
+    { content: text, msg_type: 0 },
+    { headers: { Authorization: `QQBot ${token}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+  );
 }
 
 registerCommand('ping', {
@@ -79,6 +105,111 @@ registerCommand('random', {
     await reply(m, `🎲 ${min}-${max}: ${r}`);
   },
   aliases: ['rand'],
+});
+
+// ---------- 群信息命令 ----------
+
+registerCommand('group', {
+  description: '查看群信息',
+  handler: async (m) => {
+    if (!m.guildId) return await reply(m, '❌ 仅频道可用');
+    try {
+      const token = await getAccessToken();
+      const res = await axios.get(`https://sandbox.api.sgroup.qq.com/v2/guilds/${m.guildId}`, {
+        headers: { Authorization: `QQBot ${token}` },
+        timeout: 10000,
+      });
+      const g = res.data;
+      await reply(m,
+        `🏠 群信息\n` +
+        `名称: ${g.name}\n` +
+        `群ID: ${g.id}\n` +
+        ` owner: ${g.owner_id || '未知'}`
+      );
+    } catch (e) {
+      log.error(`[group] 获取群信息失败: ${e.message}`);
+      await reply(m, `❌ 获取群信息失败: ${e.response?.data?.message || e.message}`);
+    }
+  },
+  aliases: ['ginfo', 'guild'],
+});
+
+registerCommand('members', {
+  description: '查看群成员列表',
+  handler: async (m, a) => {
+    if (!m.guildId) return await reply(m, '❌ 仅频道可用');
+    const limit = Math.min(Math.max(parseInt(a[0]) || 20, 1), 100);
+    try {
+      const token = await getAccessToken();
+      const res = await axios.get(`https://sandbox.api.sgroup.qq.com/v2/guilds/${m.guildId}/members`, {
+        params: { limit },
+        headers: { Authorization: `QQBot ${token}` },
+        timeout: 10000,
+      });
+      const members = res.data.items || [];
+      const total = res.data.total || members.length;
+      let msg = `👥 群成员 (${total}人，显示前${members.length}个)：\n\n`;
+      members.forEach((mem, i) => {
+        const nick = mem.member?.nick || mem.user?.username || '未知';
+        const uid = mem.user?.id || mem.member?.user?.id || mem.id;
+        const role = mem.roles?.join(',') || '';
+        msg += `${i + 1}. ${nick} (UID:${uid})${role ? ` [${role}]` : ''}\n`;
+      });
+      await reply(m, msg);
+    } catch (e) {
+      log.error(`[members] 获取群成员失败: ${e.message}`);
+      await reply(m, `❌ 获取群成员失败: ${e.response?.data?.message || e.message}`);
+    }
+  },
+  aliases: ['member', '群成员'],
+});
+
+registerCommand('messages', {
+  description: '获取群内最近消息',
+  handler: async (m, a) => {
+    if (!m.channelId) return await reply(m, '❌ 请在有消息的频道中使用');
+    const limit = Math.min(Math.max(parseInt(a[0]) || 10, 1), 50);
+    try {
+      const token = await getAccessToken();
+      const res = await axios.get(
+        `https://sandbox.api.sgroup.qq.com/v2/channels/${m.channelId}/messages`,
+        {
+          params: { limit },
+          headers: { Authorization: `QQBot ${token}` },
+          timeout: 10000,
+        }
+      );
+      const items = res.data.items || [];
+      if (!items.length) return await reply(m, '📭 暂无消息');
+      let msg = `💬 最近 ${items.length} 条消息：\n\n`;
+      items.forEach((item, i) => {
+        const author = item.author?.username || '未知';
+        const content = (item.content || '').replace(/\n/g, ' ').trim().slice(0, 100);
+        const ts = item.timestamp ? new Date(item.timestamp).toLocaleString('zh-CN', { hour12: false }) : '';
+        msg += `${i + 1}. [${ts}] ${author}: ${content}\n`;
+      });
+      await reply(m, msg);
+    } catch (e) {
+      log.error(`[messages] 获取消息失败: ${e.message}`);
+      await reply(m, `❌ 获取消息失败: ${e.response?.data?.message || e.message}`);
+    }
+  },
+  aliases: ['msg', 'history'],
+});
+
+registerCommand('push_status', {
+  description: '查看推送状态',
+  handler: async (m) => {
+    if (!m.guildId) return await reply(m, '❌ 仅频道可用');
+    const subs = listSub(m.guildId);
+    if (!subs.length) return await reply(m, '📭 暂无订阅，使用 /bili_sub 订阅UP主');
+    let msg = `📊 推送状态 (${subs.length}个订阅)：\n\n`;
+    subs.forEach((s, i) => {
+      msg += `${i + 1}. ${s.name} (UID:${s.uid}) → 频道 <#${s.channelId}>\n`;
+    });
+    await reply(m, msg);
+  },
+  aliases: ['push'],
 });
 
 // ---------- B站订阅命令 ----------

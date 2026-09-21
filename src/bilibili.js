@@ -6,6 +6,7 @@ const COOKIE_FILE = path.join(__dirname, '..', 'cookie.json');
 const LAST_FILE = path.join(DATA_DIR, 'last_dynamics.json');
 let biliConfig = { cookie: '', userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36' };
 const log = require('./logger');
+const server = require('./server');
 const RSSHUB_INSTANCES = ['https://rsshub.app', 'https://rsshub.rssforever.com'];
 
 function ensureDataDir() {
@@ -71,7 +72,7 @@ function parseDynamic(item) {
   const major = m.module_dynamic?.major || {};
 
   if (major.draw && major.draw.items) {
-    images = major.draw.items.map(img => img.orig?.src || img.src || img.url).filter(Boolean);
+    images = major.draw.items.map(img => img.src || img.orig?.src || img.url).filter(Boolean);
   }
   if (major.archive) {
     title = major.archive.title || '';
@@ -100,6 +101,19 @@ function parseDynamic(item) {
 }
 
 /** 策略1: 官方polymer API（需Cookie） */
+/** 获取单条动态详情（补全 feed API 缺失的文字/图片） */
+async function fetchDynamicDetail(dynamicId) {
+  const url = `https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?id=${dynamicId}`;
+  const res = await fetch(url, { headers: getHeaders(`https://t.bilibili.com/${dynamicId}`), signal: AbortSignal.timeout(8000) });
+  const data = await res.json();
+  if (data.code !== 0) return null;
+  const item = data.data?.item;
+  if (!item) return null;
+  const desc = item.modules?.module_dynamic?.desc;
+  const text = desc?.text || '';
+  return { text };
+}
+
 async function fetchOfficial(uid) {
   const url = `https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid=${uid}`;
   const res = await fetch(url, { headers: getHeaders(`https://space.bilibili.com/${uid}/dynamic`), signal: AbortSignal.timeout(8000) });
@@ -110,9 +124,17 @@ async function fetchOfficial(uid) {
   if (data.code === -799) throw new Error('请求过于频繁');
   if (data.code !== 0) throw new Error(`API错误: ${data.message}`);
   if (!data.data?.items?.length) return null;
-  // 跳过置顶动态，取第一条正常动态
+  // 跳过置顶动态，取第一条正常动态（如果 feed API 返回空内容，用 detail API 补全）
   for (const item of data.data.items) {
-    if (!item.modules?.module_tag) return parseDynamic(item);
+    if (item.modules?.module_tag?.text === '置顶') continue;
+    const parsed = parseDynamic(item);
+    if (!parsed.text && !parsed.title && parsed.images.length === 0) {
+      try {
+        const detail = await fetchDynamicDetail(parsed.dynamicId);
+        if (detail?.text) parsed.text = detail.text;
+      } catch(e) { /* ignore */ }
+    }
+    return parsed;
   }
   return data.data.items.length > 0 ? parseDynamic(data.data.items[0]) : null;
 }
@@ -161,12 +183,12 @@ async function fetchLatestDynamic(uid) {
 
 function formatMsg(d, upName) {
   const t = new Date(d.timestamp * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
-  let msg = `🔔 **${upName} 发布新动态**\n📅 ${t}\n\n`;
+  let msg = `🔔 ${upName} 发布新动态\n📅 ${t}\n`;
   if (d.title) msg += `📺 ${d.title}\n`;
   if (d.text) msg += `${d.text.slice(0, 500)}${d.text.length > 500 ? '...' : ''}\n`;
   if (d.images.length > 0) msg += `🖼️ ${d.images.length}张图片\n`;
   if (d.originInfo) msg += `🔁 转发自 @${d.originInfo.name}\n`;
-  msg += `\n🔗 [查看动态](${d.url})`;
+  msg += `🔗 ${d.url}`;
   return msg;
 }
 
@@ -190,7 +212,23 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
           log.bili(`[${sub.name || uidStr}] 新动态: ${latest.dynamicId} title="${latest.title || (latest.text && latest.text.slice(0,30))}"`);
           const _send = sendFn || (bot && bot.send && bot.send.channel ? (t, text) => bot.send.channel(t.targetId, text) : null);
           if (!_send) { log.error(`[B站监控] 无可用的消息发送函数，跳过发送`); continue; }
-          try { await _send(sub, formatMsg(latest, sub.name || uidStr)); }
+          try {
+            await _send(sub, formatMsg(latest, sub.name || uidStr));
+            // 发送图片（如果有）
+            if (latest.images && latest.images.length > 0 && sub.targetType === 'group') {
+              const maxImg = Math.min(latest.images.length, 3); // 最多发3张
+              for (let i = 0; i < maxImg; i++) {
+                try {
+                  const fileInfo = await server.uploadGroupImage(sub.targetId, latest.images[i]);
+                  if (fileInfo?.file_uuid) {
+                    await server.sendGroupImage(sub.targetId, fileInfo.file_uuid);
+                  }
+                } catch (imgErr) {
+                  log.warn('[' + (sub.name || uidStr) + '] 图片发送失败: ' + imgErr.message);
+                }
+              }
+            }
+          }
           catch(e) { log.error(`发送动态到 ${targetLabel(sub)} 失败: ${e.message}`); }
           lastDynamics[uidStr] = latest.dynamicId;
         } else {
@@ -220,16 +258,27 @@ function removeSub(target, uid) {
   saveConfig(subs);
 }
 function listSub(target) { return loadConfig().filter(s => sameTarget(s, target)); }
+/** 搜索UP主（接口有瞬时风控抖动，带Cookie+重试） */
 async function searchUp(keyword) {
-  try {
-    const res = await fetch(`https://api.bilibili.com/x/web-interface/search/type?search_type=bili_user&keyword=${encodeURIComponent(keyword)}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(5000)
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    if (data.code !== 0 || !data.data?.result?.length) return [];
-    return data.data.result.map(u => ({ uid: u.mid, name: u.uname })).slice(0, 10);
-  } catch(e) { return []; }
+  if (!biliConfig.cookie) loadBiliConfig();
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(`https://api.bilibili.com/x/web-interface/search/type?search_type=bili_user&keyword=${encodeURIComponent(keyword)}`, {
+        headers: getHeaders('https://search.bilibili.com/'),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data.code !== 0) throw new Error(`code=${data.code}`);
+      const list = (data.data?.result || []).map(u => ({ uid: u.mid, name: u.uname, fans: u.fans || 0, sign: u.usign || '' })).slice(0, 10);
+      if (list.length) return list;
+      log.warn(`[searchUp] 「${keyword}」第${attempt}次为空结果${attempt < 3 ? '，重试' : ''}`);
+    } catch (e) {
+      log.warn(`[searchUp] 「${keyword}」第${attempt}次失败: ${e.message}${attempt < 3 ? '，重试' : ''}`);
+    }
+    if (attempt < 3) await new Promise(r => setTimeout(r, 400));
+  }
+  return [];
 }
 
 /** 通过UID反查UP主名称（用户名片接口，需Cookie过-352风控；失败返回null，显示回退为UID:x） */
@@ -247,4 +296,4 @@ async function getUpName(uid) {
   } catch (e) { return null; }
 }
 
-function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, searchUp, getUpName, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, fetchLatestDynamic, formatMsg, CONFIG_FILE, COOKIE_FILE };
+function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, loadConfig, searchUp, getUpName, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, fetchLatestDynamic, formatMsg, CONFIG_FILE, COOKIE_FILE };

@@ -4,6 +4,7 @@ const DATA_DIR = path.join(__dirname, '..', 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'subscriptions.json');
 const COOKIE_FILE = path.join(__dirname, '..', 'cookie.json');
 const LAST_FILE = path.join(DATA_DIR, 'last_dynamics.json');
+const LAST_LIVE_FILE = path.join(DATA_DIR, 'last_live.json');
 let biliConfig = { cookie: '', userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36' };
 const log = require('./logger');
 const server = require('./server');
@@ -192,6 +193,47 @@ function formatMsg(d, upName) {
   return msg;
 }
 
+
+/** 检测直播状态 */
+async function checkLive(uid) {
+  try {
+    const url = 'https://api.live.bilibili.com/room/v1/Room/getRoomInfoOld?mid=' + uid;
+    const res = await fetch(url, { headers: getHeaders('https://live.bilibili.com/'), signal: AbortSignal.timeout(8000) });
+    const data = await res.json();
+    if (data.code !== 0 || !data.data) return null;
+    const d = data.data;
+    // liveStatus: 0=未开播 1=正在直播 2=轮播中
+    if (d.liveStatus !== 1) return null;
+    // 获取直播间详细信息（分区等）
+    let area = '';
+    try {
+      const infoUrl = 'https://api.live.bilibili.com/room/v1/Room/get_info?room_id=' + d.roomid;
+      const infoRes = await fetch(infoUrl, { headers: getHeaders('https://live.bilibili.com/'), signal: AbortSignal.timeout(5000) });
+      const infoData = await infoRes.json();
+      area = infoData.data?.area_name || '';
+    } catch(e) {}
+    return {
+      roomId: d.roomid,
+      title: d.title || '直播中',
+      area: area,
+      cover: d.cover || '',
+      url: d.url || ('https://live.bilibili.com/' + d.roomid),
+    };
+  } catch(e) {
+    log.warn('[checkLive] UID=' + uid + ' ' + e.message);
+    return null;
+  }
+}
+
+/** 格式化直播开播消息 */
+function formatLiveMsg(live, upName) {
+  let msg = '🔴 ' + upName + ' 开播了！\n';
+  if (live.area) msg += '📺 直播分区：' + live.area + '\n';
+  if (live.title) msg += '📝 直播标题：' + live.title + '\n';
+  msg += '\n🔗 ' + live.url;
+  return msg;
+}
+
 function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
   log.bili(`B站监控启动 (${intervalMinutes}分钟间隔)`);
   loadBiliConfig();
@@ -199,6 +241,10 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
   let lastDynamics = {};
   try {
     if (fs.existsSync(LAST_FILE)) lastDynamics = JSON.parse(fs.readFileSync(LAST_FILE, 'utf-8'));
+  } catch(e) {}
+  let lastLive = {};
+  try {
+    if (fs.existsSync(LAST_LIVE_FILE)) lastLive = JSON.parse(fs.readFileSync(LAST_LIVE_FILE, 'utf-8'));
   } catch(e) {}
   const check = async () => {
     const subs = loadConfig();
@@ -236,7 +282,30 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
         }
       } catch(e) { log.error(`[${sub.name || uidStr}] 异常: ${e.message}`); }
     }
+    // 直播检测
+    for (const sub of subs) {
+      if (!sub.uid || !sub.targetId) continue;
+      const uidStr = String(sub.uid);
+      try {
+        const live = await checkLive(sub.uid);
+        if (live && !lastLive[uidStr]) {
+          // 新开播
+          log.bili('[' + (sub.name || uidStr) + '] 开播: ' + live.title);
+          const _send = sendFn || (bot && bot.send && bot.send.channel ? (t, text) => bot.send.channel(t.targetId, text) : null);
+          if (_send) {
+            try {
+              await _send(sub, formatLiveMsg(live, sub.name || uidStr));
+            } catch(e) { log.error('发送直播通知失败: ' + e.message); }
+          }
+        } else if (!live && lastLive[uidStr]) {
+          log.bili('[' + (sub.name || uidStr) + '] 下播');
+        }
+        if (live) lastLive[uidStr] = live.roomId;
+        else delete lastLive[uidStr];
+      } catch(e) { log.error('[' + (sub.name || uidStr) + '] 直播检测异常: ' + e.message); }
+    }
     try { fs.writeFileSync(LAST_FILE, JSON.stringify(lastDynamics, null, 2)); } catch(e) {}
+    try { fs.writeFileSync(LAST_LIVE_FILE, JSON.stringify(lastLive, null, 2)); } catch(e) {}
   };
   check();
   return setInterval(check, intervalMinutes * 60 * 1000);
@@ -296,4 +365,4 @@ async function getUpName(uid) {
   } catch (e) { return null; }
 }
 
-function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, loadConfig, searchUp, getUpName, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, fetchLatestDynamic, formatMsg, CONFIG_FILE, COOKIE_FILE };
+function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, loadConfig, searchUp, getUpName, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, fetchLatestDynamic, formatMsg, checkLive, formatLiveMsg, CONFIG_FILE, COOKIE_FILE };

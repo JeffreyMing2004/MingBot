@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MingBot 面板</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d3a;--accent:#6c5ce7;--accent2:#a29bfe;--green:#00b894;--red:#e17055;--yellow:#fdcb6e;--text:#e0e0e0;--text2:#8a8fa3}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.container{max-width:1200px;margin:0 auto;padding:20px}
+header{display:flex;align-items:center;justify-content:space-between;padding:16px 0;border-bottom:1px solid var(--border);margin-bottom:24px}
+header h1{font-size:20px;font-weight:600}
+header h1 span{color:var(--accent2);font-weight:700}
+.status-badge{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:500}
+.status-badge .dot{width:8px;height:8px;border-radius:50%;animation:pulse 2s infinite}
+.status-online{background:rgba(0,184,148,.12);color:var(--green)}.status-online .dot{background:var(--green)}
+.status-offline{background:rgba(225,112,85,.12);color:var(--red)}.status-offline .dot{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+@media(max-width:768px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px}
+.card-title{font-size:14px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.card-title svg{width:16px;height:16px;opacity:.7}
+.stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.stat-item{text-align:center;padding:12px 8px;background:rgba(255,255,255,.03);border-radius:8px}
+.stat-value{font-size:24px;font-weight:700;color:var(--accent2)}
+.stat-label{font-size:12px;color:var(--text2);margin-top:4px}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-size:12px;color:var(--text2);font-weight:500;padding:8px 12px;border-bottom:1px solid var(--border)}
+td{padding:10px 12px;font-size:13px;border-bottom:1px solid rgba(255,255,255,.04)}
+tr:hover td{background:rgba(255,255,255,.02)}
+.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:500}
+.tag-green{background:rgba(0,184,148,.15);color:var(--green)}
+.tag-yellow{background:rgba(253,203,110,.15);color:var(--yellow)}
+.tag-red{background:rgba(225,112,85,.15);color:var(--red)}
+.tag-blue{background:rgba(108,92,231,.15);color:var(--accent2)}
+.btn{padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:500;transition:all .15s}
+.btn-primary{background:var(--accent);color:#fff}.btn-primary:hover{background:#5b4bd5}
+.btn-danger{background:var(--red);color:#fff}.btn-danger:hover{background:#d63031}
+.btn-sm{padding:5px 10px;font-size:12px;border-radius:6px}
+.btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text)}.btn-ghost:hover{border-color:var(--accent);color:var(--accent2)}
+.log-box{background:#0d0f14;border-radius:8px;padding:14px;font-family:'JetBrains Mono',Consolas,monospace;font-size:12px;line-height:1.7;max-height:320px;overflow-y:auto;color:var(--text2)}
+.log-box .log-error{color:var(--red)}.log-box .log-warn{color:var(--yellow)}.log-box .log-info{color:var(--green)}.log-box .log-event{color:var(--accent2)}
+.mode-compare{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.mode-box{background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:10px;padding:16px}
+.mode-box h3{font-size:15px;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.mode-box ul{list-style:none;font-size:13px;color:var(--text2)}
+.mode-box li{padding:4px 0;display:flex;align-items:flex-start;gap:8px}
+.mode-box li::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;margin-top:6px;flex-shrink:0}
+.mode-ws li::before{background:var(--green)}.mode-ws.active{border-color:var(--green)}
+.mode-wh li::before{background:var(--accent2)}.mode-wh.active{border-color:var(--accent2)}
+.mode-tag{font-size:11px;padding:2px 8px;border-radius:4px;margin-left:auto}
+.mode-ws .mode-tag{background:rgba(0,184,148,.15);color:var(--green)}
+.mode-wh .mode-tag{background:rgba(162,155,254,.15);color:var(--accent2)}
+.empty{text-align:center;color:var(--text2);padding:32px;font-size:13px}
+.flex{display:flex;align-items:center;gap:8px}
+.mt{margin-top:16px}
+.mb{margin-bottom:16px}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1><span>Ming</span>Bot 控制面板</h1>
+    <div id="statusBadge" class="status-badge status-offline"><div class="dot"></div><span>检测中...</span></div>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <div class="card-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+        运行状态
+      </div>
+      <div class="stat-grid" id="statsGrid">
+        <div class="stat-item"><div class="stat-value" id="statSubs">-</div><div class="stat-label">订阅数</div></div>
+        <div class="stat-item"><div class="stat-value" id="statCmds">-</div><div class="stat-label">命令数</div></div>
+        <div class="stat-item"><div class="stat-value" id="statMode">-</div><div class="stat-label">运行模式</div></div>
+      </div>
+      <div class="mt" style="font-size:12px;color:var(--text2);display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div>⏱ 运行: <span id="hbUptime" style="color:var(--text)">-</span></div>
+        <div>💾 内存: <span id="hbMemory" style="color:var(--text)">-</span></div>
+        <div>🔗 Tunnel: <span id="hbTunnel" style="color:var(--text)">检测中</span></div>
+        <div>🔄 重启: <span id="hbRestart" style="color:var(--text)">0</span> 次</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z"/><path d="M12 6v6l4 2"/></svg>
+        B站配置
+      </div>
+      <div id="biliStatus" style="font-size:13px;line-height:2">加载中...</div>
+    </div>
+  </div>
+
+  <div class="card mb">
+    <div class="card-title">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      订阅列表
+    </div>
+    <table>
+      <thead><tr><th>#</th><th>UP主</th><th>UID</th><th>目标</th><th>操作</th></tr></thead>
+      <tbody id="subsTable"><tr><td colspan="5" class="empty">加载中...</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="card mb">
+    <div class="card-title">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+      可用命令
+    </div>
+    <table>
+      <thead><tr><th>命令</th><th>说明</th><th>别名</th></tr></thead>
+      <tbody id="cmdsTable"><tr><td colspan="3" class="empty">加载中...</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="card mb">
+    <div class="card-title">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      实时日志
+    </div>
+    <div class="log-box" id="logBox">等待连接...</div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+      WebSocket vs Webhook
+    </div>
+    <div class="mode-compare">
+      <div class="mode-box mode-ws" id="modeWs">
+        <h3>WebSocket 模式 <span class="mode-tag">默认</span></h3>
+        <ul>
+          <li>机器人主动连接 QQ 网关，维持长连接</li>
+          <li>无需公网 IP 或域名</li>
+          <li>消息收发延迟低（~100ms）</li>
+          <li>群聊主动消息：受限，需要群内有用户先 @机器人</li>
+          <li>频道消息：支持主动推送</li>
+          <li>适合：开发调试、小规模部署</li>
+        </ul>
+      </div>
+      <div class="mode-box mode-wh" id="modeWh">
+        <h3>Webhook 回调模式 <span class="mode-tag">当前</span></h3>
+        <ul>
+          <li>QQ 服务器主动 POST 事件到你的回调地址</li>
+          <li>需要公网可达的 URL（域名 + HTTPS）</li>
+          <li>消息收发延迟取决于网络（~200-500ms）</li>
+          <li>群聊主动消息：同样受限，需群内用户先 @机器人</li>
+          <li>可配合 Cloudflare Tunnel 免域名使用</li>
+          <li>适合：生产环境、多机器人管理</li>
+        </ul>
+      </div>
+    </div>
+    <p style="margin-top:14px;font-size:12px;color:var(--text2);line-height:1.8">
+      <strong style="color:var(--yellow)">关于群聊主动消息：</strong>QQ 群聊机器人的主动推送能力受平台限制，两种模式下都需要群内用户先 @机器人 后，机器人才能在该群发送消息。这不是代码问题，而是 QQ 开放平台对群聊机器人的策略限制。如需真正的主动推送，建议使用频道机器人或第三方推送服务（Server酱、PushPlus 等）。
+    </p>
+  </div>
+</div>
+
+<script>
+const API = location.origin;
+
+async function api(path) {
+  try { const r = await fetch(API + path); return await r.json(); }
+  catch(e) { return null; }
+}
+
+async function loadStatus() {
+  const [data, hb, wd] = await Promise.all([api('/api/status'), api('/api/heartbeat'), api('/api/watchdog')]);
+  if (!data) return;
+  document.getElementById('statusBadge').className = 'status-badge status-online';
+  document.querySelector('#statusBadge span').textContent = '运行中';
+  document.getElementById('statSubs').textContent = data.subscriptions ?? '-';
+  document.getElementById('statCmds').textContent = data.commands ?? '-';
+  document.getElementById('statMode').textContent = data.mode || '-';
+
+  const bs = data.biliConfig;
+  document.getElementById('biliStatus').innerHTML = `
+    <div>Cookie: ${bs?.hasCookie ? '<span class="tag tag-green">已配置</span>' : '<span class="tag tag-red">未配置</span>'}</div>
+    <div style="color:var(--text2);font-size:12px;margin-top:4px">${bs?.message || ''}</div>
+  `;
+
+  if (hb && hb.ok) {
+    document.getElementById('hbUptime').textContent = hb.uptimeStr;
+    document.getElementById('hbMemory').textContent = hb.memory.rss + 'MB / ' + hb.memory.total + 'MB';
+  }
+  if (wd) {
+    const tEl = document.getElementById('hbTunnel');
+    tEl.textContent = wd.cloudflared ? '运行中' : '已断开';
+    tEl.style.color = wd.cloudflared ? 'var(--green)' : 'var(--red)';
+    document.getElementById('hbRestart').textContent = wd.restartCount || 0;
+  }
+}
+
+async function loadSubs() {
+  const data = await api('/api/subscriptions');
+  const tbody = document.getElementById('subsTable');
+  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无订阅</td></tr>'; return; }
+  tbody.innerHTML = data.map((s, i) => `<tr>
+    <td>${i+1}</td>
+    <td><strong>${s.name || '未知'}</strong></td>
+    <td><code style="color:var(--accent2)">${s.uid}</code></td>
+    <td><span class="tag tag-blue">${s.targetType === 'group' ? '群聊' : '频道'}</span></td>
+    <td><button class="btn btn-danger btn-sm" onclick="removeSub(${s.uid},'${s.targetType}','${s.targetId}')">删除</button></td>
+  </tr>`).join('');
+}
+
+async function removeSub(uid, type, targetId) {
+  if (!confirm('确定取消订阅 UID:' + uid + ' ?')) return;
+  await fetch(API + '/api/subscription', { method:'DELETE', headers:{'Content-Type':'application/json'}, body: JSON.stringify({uid, targetType:type, targetId}) });
+  loadSubs();
+}
+
+async function loadCommands() {
+  const data = await api('/api/commands');
+  const tbody = document.getElementById('cmdsTable');
+  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="3" class="empty">无命令</td></tr>'; return; }
+  tbody.innerHTML = data.map(c => `<tr>
+    <td><code style="color:var(--accent2)">/${c.name}</code></td>
+    <td>${c.description || ''}</td>
+    <td style="color:var(--text2)">${(c.aliases||[]).join(', ')}</td>
+  </tr>`).join('');
+}
+
+async function loadLogs() {
+  const data = await api('/api/logs');
+  const box = document.getElementById('logBox');
+  if (!data?.length) { box.textContent = '暂无日志'; return; }
+  box.innerHTML = data.map(l => {
+    let cls = '';
+    if (l.includes('[ERROR]') || l.includes('Error:')) cls = 'log-error';
+    else if (l.includes('[WARN]')) cls = 'log-warn';
+    else if (l.includes('[INFO]')) cls = 'log-info';
+    else if (l.includes('[EVENT]') || l.includes('[CMD')) cls = 'log-event';
+    return `<div class="${cls}">${escHtml(l)}</div>`;
+  }).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+loadStatus(); loadSubs(); loadCommands(); loadLogs();
+setInterval(loadLogs, 5000);
+setInterval(loadStatus, 30000);
+</script>
+</body>
+</html>

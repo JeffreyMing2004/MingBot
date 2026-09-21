@@ -1,10 +1,11 @@
-﻿/**
+/**
  * 命令处理器（内置命令）
  * 使用 message.reply(text) 发送回复，兼容 WebSocket 和 HTTP 回调两种模式
  */
 const axios = require('axios');
 const { registerCommand } = require('./commands');
-const { addSub, removeSub, listSub, searchUp, getUpName, saveBiliConfig, getApiStatus } = require('./bilibili');
+const { addSub, removeSub, listSub, searchUp, getUpName, saveBiliConfig, getApiStatus, fetchLatestDynamic, formatMsg } = require('./bilibili');
+const server = require('./server');
 const config = require('./config');
 const log = require('./logger');
 
@@ -21,6 +22,15 @@ async function reply(message, text) {  try {
     console.error('[reply] Error:', e.message);
     throw e;
   }
+}
+
+// 主动发送（不依赖 msg_id，不会超时）
+async function proactiveSend(target, text) {
+  const server = require('./server');
+  if (target.targetType === 'group') {
+    return server.sendToGroup(target.targetId, text);
+  }
+  return server.sendToChannel(target.targetId, text);
 }
 
 /** 获取 access_token */
@@ -243,13 +253,24 @@ registerCommand('bili_sub', {
         if (r.length === 1) {
           subs.push({ uid: r[0].uid, name: r[0].name });
         } else {
-          let msg = '多个结果，请使用UID订阅：\n';
-          r.forEach((x, i) => { msg += `${i + 1}. ${x.name} (UID:${x.uid})\n`; });
-          return await reply(m, msg);
+          const q = arg.toLowerCase();
+          const exact = r.find(x => x.name.toLowerCase() === q);
+          if (exact) {
+            subs.push({ uid: exact.uid, name: exact.name });
+          } else {
+            const best = r.sort((a, b) => b.fans - a.fans)[0];
+            subs.push({ uid: best.uid, name: best.name });
+            let hint = '🔍 搜索结果（已自动选择粉丝最多的）：\n';
+            r.slice(0, 5).forEach((x, i) => {
+              const fansStr = x.fans > 10000 ? `${(x.fans / 10000).toFixed(1)}万` : String(x.fans);
+              hint += `${i + 1}. ${x.name} (UID:${x.uid}, 粉丝:${fansStr})${x.sign ? ' — ' + x.sign.slice(0, 30) : ''}\n`;
+            });
+            await reply(m, hint);
+          }
         }
       }
     }
-    if (!subs.length) return await reply(m, '未找到匹配的UP主');
+    if (!subs.length) return await reply(m, `未找到「${a.join(' ')}」，请确认名称或改用UID订阅（B站空间页网址中的数字）`);
     const sub = subs[0];
     // 按UID订阅时反查UP主真实名称
     if (/^\d+$/.test(String(sub.uid)) && sub.name.startsWith('UID:')) {
@@ -296,13 +317,63 @@ registerCommand('bili_search', {
   handler: async (m, a) => {
     if (!a.length) return await reply(m, '用法: /bili_search <关键词>');
     const r = await searchUp(a.join(' '));
-    if (!r.length) return await reply(m, '未找到相关UP主');
+    if (!r.length) return await reply(m, '未找到相关UP主，可尝试更换关键词或使用UID');
     let msg = '🔍 搜索结果：\n\n';
-    r.forEach((x, i) => { msg += `${i + 1}. ${x.name} (UID:${x.uid})\n`; });
-    msg += '\n使用 /bili_sub <UID> 订阅';
+    r.forEach((x, i) => {
+      const fansStr = x.fans > 10000 ? `${(x.fans / 10000).toFixed(1)}万` : String(x.fans);
+      msg += `${i + 1}. ${x.name} (UID:${x.uid}, 粉丝:${fansStr})` + '\n';
+    });
+    msg += '\n使用 /bili_sub <名称或UID> 订阅（名称可直接订阅）';
     await reply(m, msg);
   },
   aliases: ['bsearch'],
+});
+
+
+registerCommand('bili_fetch', {
+  description: '手动获取UP主最新动态',
+  handler: async (m, a) => {
+    const t = getTarget(m);
+    if (!t) return await reply(m, '❌ 仅群聊或频道可用');
+
+    let targets = [];
+    if (a.length && /^\d+$/.test(a[0])) {
+      targets = [{ uid: Number(a[0]), name: 'UID:' + a[0] }];
+    } else {
+      targets = listSub(t);
+      if (!targets.length) return await reply(m, '📭 暂无订阅，使用 /bili_sub 订阅UP主');
+    }
+
+    await reply(m, `⏳ 正在获取 ${targets.length} 个UP主的最新动态...`);
+
+    for (const sub of targets) {
+      try {
+        const latest = await fetchLatestDynamic(sub.uid);
+        if (!latest) {
+          await proactiveSend(t, `⚠️ ${sub.name || sub.uid} 暂无动态`);
+        } else {
+          await proactiveSend(t, formatMsg(latest, sub.name || String(sub.uid)));
+          // 发送图片
+          if (latest.images && latest.images.length > 0 && t.targetType === 'group') {
+            const maxImg = Math.min(latest.images.length, 3);
+            for (let i = 0; i < maxImg; i++) {
+              try {
+                const fileInfo = await server.uploadGroupImage(t.targetId, latest.images[i]);
+                if (fileInfo?.file_uuid) {
+                  await server.sendGroupImage(t.targetId, fileInfo.file_uuid);
+                }
+              } catch (imgErr) {
+                log.warn('图片发送失败: ' + imgErr.message);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        await proactiveSend(t, `❌ 获取 ${sub.name || sub.uid} 动态失败: ${e.message}`);
+      }
+    }
+  },
+  aliases: ['bfetch', 'fetch'],
 });
 
 registerCommand('bili_cookie', {

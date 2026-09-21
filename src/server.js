@@ -499,13 +499,27 @@ function createServer(handler, secret) {
         }
 
         if (req.url === '/api/logs' && req.method === 'GET') {
-          const logFile = path.join(__dirname, '..', 'logs', 'pm2-out.log');
-          const errFile = path.join(__dirname, '..', 'logs', 'pm2-error.log');
-          let lines = [];
-          try { lines = fs.readFileSync(logFile, 'utf-8').trim().split('\n').slice(-80); } catch(e) {}
-          try { const el = fs.readFileSync(errFile, 'utf-8').trim().split('\n').slice(-20); lines = lines.concat(el); } catch(e) {}
+          const botLogFile = path.join(__dirname, '..', 'logs', 'bot.log');
+          const pm2OutFile = path.join(__dirname, '..', 'logs', 'pm2-out.log');
+          const pm2ErrFile = path.join(__dirname, '..', 'logs', 'pm2-error.log');
+          const readTail = (file, n, regex) => {
+            try {
+              let lastTs = '';
+              return fs.readFileSync(file, 'utf-8').trim().split('\n').slice(-n).map(l => {
+                const m = l.match(regex);
+                if (m) lastTs = m[1] || m[0];
+                return { line: l, ts: lastTs };
+              });
+            } catch (e) { return []; }
+          };
+          const botLog = readTail(botLogFile, 80, /^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]/);
+          const pm2Out = readTail(pm2OutFile, 80, /^(\d{2}:\d{2}:\d{2}):/);
+          const pm2Err = readTail(pm2ErrFile, 20, /^(\d{2}:\d{2}:\d{2}):/);
+          const lines = botLog.concat(pm2Out).concat(pm2Err)
+            .sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0))
+            .map(k => k.line);
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(lines.slice(-60).reverse()));
+          res.end(JSON.stringify(lines.slice(-100)));
           return;
         }
     

@@ -22,6 +22,8 @@
 const http = require('http');
 const https = require('https');
 const nacl = require('tweetnacl');
+const fs = require('fs');
+const path = require('path');
 const log = require('./logger');
 
 let botConfig = null;
@@ -163,6 +165,74 @@ async function sendToDms(guildId, text) {
   }, token);
   const channelId = dms.channel_id || dms.id;
   return sendToChannel(channelId, text);
+}
+
+
+// 上传群聊图片：POST /v2/groups/{group_openid}/files
+async function uploadGroupImage(groupOpenid, imageUrl) {
+  const token = await getAccessToken();
+  // 下载图片
+  const imgRes = await fetch(imageUrl, {
+    headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://t.bilibili.com/' },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!imgRes.ok) throw new Error('图片下载失败: HTTP ' + imgRes.status);
+  const imgBuf = Buffer.from(await imgRes.arrayBuffer());
+  const ext = (imgRes.headers.get('content-type') || '').includes('png') ? 'png' : 'jpg';
+  const filename = 'dynamic_' + Date.now() + '.' + ext;
+
+  // 构建 multipart/form-data
+  const boundary = '----FormBoundary' + Date.now();
+  const parts = [];
+  parts.push(Buffer.from('--' + boundary + '\r\nContent-Disposition: form-data; name="file_type"\r\n\r\n1'));
+  parts.push(Buffer.from('\r\n--' + boundary + '\r\nContent-Disposition: form-data; name="file_name"\r\n\r\n' + filename));
+  parts.push(Buffer.from('\r\n--' + boundary + '\r\nContent-Disposition: form-data; name="srv_send_msg"\r\n\r\nfalse'));
+  parts.push(Buffer.from('\r\n--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="' + filename + '"\r\nContent-Type: image/' + ext + '\r\n\r\n'));
+  parts.push(imgBuf);
+  parts.push(Buffer.from('\r\n--' + boundary + '--\r\n'));
+  const body = Buffer.concat(parts);
+
+  const url = apiBase() + '/v2/groups/' + groupOpenid + '/files';
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'QQBot ' + token,
+        'Content-Type': 'multipart/form-data; boundary=' + boundary,
+        'Content-Length': body.length,
+      },
+      timeout: 20000,
+    }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => {
+        let json = null;
+        try { json = d ? JSON.parse(d) : null; } catch(e) {}
+        if (res.statusCode < 400 && (!json?.code || json.code === 0)) {
+          resolve(json || {});
+        } else {
+          reject(new Error('上传图片失败: HTTP ' + res.statusCode + ' ' + (json?.message || d)));
+        }
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('图片上传超时')));
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+// 发送群聊图片消息
+async function sendGroupImage(groupOpenid, fileUuid, msgId) {
+  const token = await getAccessToken();
+  const body = { msg_type: 2, media: { file_info: fileUuid } };
+  if (msgId) {
+    body.msg_id = msgId;
+    body.msg_seq = nextMsgSeq(msgId);
+  }
+  const res = await postJson(apiBase() + '/v2/groups/' + groupOpenid + '/messages', body, token);
+  log.info('[sendGroupImage] 图片消息发送成功 id=' + (res.id || '-'));
+  return res;
 }
 
 function postJson(url, body, token) {
@@ -311,6 +381,16 @@ function buildVerifier(secret) {
 }
 
 // ─── HTTP 服务器 ───────────────────────────────────────────────────────────────
+function formatUptime(s) {
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  if (d > 0) return d + '天' + h + '时' + m + '分';
+  if (h > 0) return h + '时' + m + '分' + sec + '秒';
+  return m + '分' + sec + '秒';
+}
+
 function createServer(handler, secret) {
   const verify = buildVerifier(secret);
 
@@ -323,6 +403,138 @@ function createServer(handler, secret) {
       res.writeHead(200); res.end(); return;
     }
 
+
+
+
+    // ─── 面板 API ──────────────────────────────────────────────────────────────
+        if (req.url === '/api/status' && req.method === 'GET') {
+          const { loadConfig } = require('./bilibili');
+          const { getAllCommands } = require('./commands');
+          const { getApiStatus } = require('./bilibili');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: true,
+            mode: botConfig?.mode || 'websocket',
+            sandbox: botConfig?.sandbox || false,
+            subscriptions: loadConfig().length,
+            commands: [...new Set(getAllCommands().keys())].length,
+            biliConfig: getApiStatus(),
+          }));
+          return;
+        }
+    
+        if (req.url === '/api/subscriptions' && req.method === 'GET') {
+          const { loadConfig } = require('./bilibili');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(loadConfig()));
+          return;
+        }
+    
+        if (req.url === '/api/subscription' && req.method === 'DELETE') {
+          let body = '';
+          req.on('data', c => body += c);
+          req.on('end', () => {
+            try {
+              const { uid, targetType, targetId } = JSON.parse(body);
+              const { removeSub } = require('./bilibili');
+              const target = { targetType, targetId };
+              removeSub(target, uid);
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: true }));
+            } catch(e) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: e.message }));
+            }
+          });
+          return;
+        }
+    
+        if (req.url === '/api/commands' && req.method === 'GET') {
+          const { getAllCommands } = require('./commands');
+          const seen = new Set();
+          const cmds = [];
+          for (const [, c] of getAllCommands()) {
+            if (seen.has(c.name)) continue;
+            seen.add(c.name);
+            cmds.push({ name: c.name, description: c.description, aliases: c.aliases || [] });
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(cmds));
+          return;
+        }
+    
+        
+        
+        if (req.url === '/api/watchdog' && req.method === 'GET') {
+          try {
+            const data = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'data', 'watchdog.json'), 'utf-8'));
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(data));
+          } catch(e) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ bot: { ok: false }, cloudflared: false, checkTime: 0, restartCount: 0 }));
+          }
+          return;
+        }
+
+        if (req.url === '/api/heartbeat' && req.method === 'GET') {
+          const uptime = process.uptime();
+          const mem = process.memoryUsage();
+          const hb = {
+            ok: true,
+            uptime: Math.floor(uptime),
+            uptimeStr: formatUptime(uptime),
+            memory: {
+              rss: Math.round(mem.rss / 1024 / 1024),
+              heap: Math.round(mem.heapUsed / 1024 / 1024),
+              total: Math.round(mem.heapTotal / 1024 / 1024),
+            },
+            pid: process.pid,
+            node: process.version,
+            timestamp: Date.now(),
+          };
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(hb));
+          return;
+        }
+
+        if (req.url === '/api/logs' && req.method === 'GET') {
+          const logFile = path.join(__dirname, '..', 'logs', 'pm2-out.log');
+          const errFile = path.join(__dirname, '..', 'logs', 'pm2-error.log');
+          let lines = [];
+          try { lines = fs.readFileSync(logFile, 'utf-8').trim().split('\n').slice(-80); } catch(e) {}
+          try { const el = fs.readFileSync(errFile, 'utf-8').trim().split('\n').slice(-20); lines = lines.concat(el); } catch(e) {}
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(lines.slice(-60).reverse()));
+          return;
+        }
+    
+        // Root redirect to panel
+    if (req.url === '/' || req.url === '/index.html' || req.url.startsWith('/index')) {
+      try {
+        const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf-8');
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(html);
+      } catch(e) { res.writeHead(404); res.end('Panel not found: ' + e.message); }
+      return;
+    }
+
+    // 静态文件：面板 fallback
+    if (false && (req.url === '/' || req.url === '/index.html')) {
+          const htmlFile = path.join(__dirname, '..', 'public', 'index.html');
+          try {
+            const html = fs.readFileSync(htmlFile, 'utf-8');
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(html);
+          } catch(e) {
+            res.writeHead(404); res.end('Panel not found');
+          }
+          return;
+        }
+    
+        
+
+    // Only callback POST past this point
     if (req.url !== callbackPath || req.method !== 'POST') {
       res.writeHead(404); res.end('Not Found'); return;
     }
@@ -431,4 +643,4 @@ function start(handler, port) {
   return server;
 }
 
-module.exports = { init, start, getCallbackUrl, getAccessToken, signMessage, verifySignature, deriveKeypair, setBotUser, getBotUserId: () => botConfig?._botUserId || null, sendToChannel, sendToGroup, sendToC2C };
+module.exports = { init, start, getCallbackUrl, getAccessToken, signMessage, verifySignature, deriveKeypair, setBotUser, getBotUserId: () => botConfig?._botUserId || null, sendToChannel, sendToGroup, sendToC2C, uploadGroupImage, sendGroupImage };

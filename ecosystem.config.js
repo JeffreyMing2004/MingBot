@@ -8,7 +8,6 @@ module.exports = {
     exec_mode: 'fork',
     env: {
       NODE_ENV: 'production',
-      QQ_BOT_USE_CALLBACK: 'true',
       QQ_BOT_SANDBOX: 'true',
       BOT_PORT: '9000',
       HTTP_PROXY: '',
@@ -20,6 +19,18 @@ module.exports = {
     out_file: path.resolve('H:\\WorkSpace\\MingBot', 'logs', 'pm2-out.log'),
     log_date_format: 'HH:mm:ss',
     ignore_watch: ['node_modules', 'logs', '.pm2', '.vscode', 'data', '.npm-cache', '.pnpm-store'],
+    watch: false,
+  },
+  {
+    name: 'mingbot-watchdog',
+    script: 'watchdog.js',
+    cwd: 'H:\\WorkSpace\\MingBot',
+    exec_mode: 'fork',
+    env: { NODE_ENV: 'production' },
+    max_memory_restart: '128M',
+    error_file: 'H:\\WorkSpace\\MingBot\\logs\\pm2-error.log',
+    out_file: 'H:\\WorkSpace\\MingBot\\logs\\pm2-out.log',
+    log_date_format: 'HH:mm:ss',
     watch: false,
   }],
 };

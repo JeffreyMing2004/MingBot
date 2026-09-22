@@ -260,15 +260,13 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
           if (!_send) { log.error(`[B站监控] 无可用的消息发送函数，跳过发送`); continue; }
           try {
             await _send(sub, formatMsg(latest, sub.name || uidStr));
-            // 发送图片（如果有）
+            // 发送图片（如果有，仅群聊；频道富媒体是另一套接口）
             if (latest.images && latest.images.length > 0 && sub.targetType === 'group') {
               const maxImg = Math.min(latest.images.length, 3); // 最多发3张
               for (let i = 0; i < maxImg; i++) {
                 try {
-                  const fileInfo = await server.uploadGroupImage(sub.targetId, latest.images[i]);
-                  if (fileInfo?.file_uuid) {
-                    await server.sendGroupImage(sub.targetId, fileInfo.file_uuid);
-                  }
+                  const sent = await server.sendGroupImageByUrl(sub.targetId, latest.images[i]);
+                  if (!sent) log.warn('[' + (sub.name || uidStr) + '] 图片发送失败: ' + latest.images[i]);
                 } catch (imgErr) {
                   log.warn('[' + (sub.name || uidStr) + '] 图片发送失败: ' + imgErr.message);
                 }
@@ -296,6 +294,13 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
             try {
               await _send(sub, formatLiveMsg(live, sub.name || uidStr));
             } catch(e) { log.error('发送直播通知失败: ' + e.message); }
+            // 开播封面也发一份（仅群聊，走富媒体上传，同 bili-notify 的做法）
+            if (live.cover && sub.targetType === 'group') {
+              try {
+                const sent = await server.sendGroupImageByUrl(sub.targetId, live.cover);
+                if (!sent) log.warn('[' + (sub.name || uidStr) + '] 直播封面发送失败: ' + live.cover);
+              } catch(e) { log.warn('[' + (sub.name || uidStr) + '] 直播封面发送失败: ' + e.message); }
+            }
           }
         } else if (!live && lastLive[uidStr]) {
           log.bili('[' + (sub.name || uidStr) + '] 下播');

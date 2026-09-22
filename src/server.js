@@ -24,6 +24,7 @@ const https = require('https');
 const nacl = require('tweetnacl');
 const fs = require('fs');
 const path = require('path');
+const media = require('./media');
 const log = require('./logger');
 
 let botConfig = null;
@@ -168,64 +169,40 @@ async function sendToDms(guildId, text) {
 }
 
 
-// 上传群聊图片：POST /v2/groups/{group_openid}/files
-async function uploadGroupImage(groupOpenid, imageUrl) {
+// ─── 群聊富媒体（移植自 bili-notify/media.py + qqapi.py）──────────────────────
+// 官方 /files 接口只收 JSON：file_data=base64 本地直传，或 url=平台自己下载转存。
+// （此前用的 multipart/form-data 表单格式是其他机器人平台的写法，官方不认。）
+// 上传 srv_send_msg=false 只换 file_info 不发消息，再走 msg_type=7 发送。
+// 两种传法都不经过客户端渲染，不受「消息URL配置」报备限制。
+
+// POST /v2/groups/{group_openid}/files，返回 {file_info, file_uuid, ttl}
+async function uploadGroupFile(groupOpenid, body) {
   const token = await getAccessToken();
-  // 下载图片
-  const imgRes = await fetch(imageUrl, {
-    headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://t.bilibili.com/' },
-    signal: AbortSignal.timeout(15000),
-  });
-  if (!imgRes.ok) throw new Error('图片下载失败: HTTP ' + imgRes.status);
-  const imgBuf = Buffer.from(await imgRes.arrayBuffer());
-  const ext = (imgRes.headers.get('content-type') || '').includes('png') ? 'png' : 'jpg';
-  const filename = 'dynamic_' + Date.now() + '.' + ext;
-
-  // 构建 multipart/form-data
-  const boundary = '----FormBoundary' + Date.now();
-  const parts = [];
-  parts.push(Buffer.from('--' + boundary + '\r\nContent-Disposition: form-data; name="file_type"\r\n\r\n1'));
-  parts.push(Buffer.from('\r\n--' + boundary + '\r\nContent-Disposition: form-data; name="file_name"\r\n\r\n' + filename));
-  parts.push(Buffer.from('\r\n--' + boundary + '\r\nContent-Disposition: form-data; name="srv_send_msg"\r\n\r\nfalse'));
-  parts.push(Buffer.from('\r\n--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="' + filename + '"\r\nContent-Type: image/' + ext + '\r\n\r\n'));
-  parts.push(imgBuf);
-  parts.push(Buffer.from('\r\n--' + boundary + '--\r\n'));
-  const body = Buffer.concat(parts);
-
-  const url = apiBase() + '/v2/groups/' + groupOpenid + '/files';
-  return new Promise((resolve, reject) => {
-    const req = https.request(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': 'QQBot ' + token,
-        'Content-Type': 'multipart/form-data; boundary=' + boundary,
-        'Content-Length': body.length,
-      },
-      timeout: 20000,
-    }, res => {
-      let d = '';
-      res.on('data', c => d += c);
-      res.on('end', () => {
-        let json = null;
-        try { json = d ? JSON.parse(d) : null; } catch(e) {}
-        if (res.statusCode < 400 && (!json?.code || json.code === 0)) {
-          resolve(json || {});
-        } else {
-          reject(new Error('上传图片失败: HTTP ' + res.statusCode + ' ' + (json?.message || d)));
-        }
-      });
-    });
-    req.on('timeout', () => req.destroy(new Error('图片上传超时')));
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
+  // base64 直传时请求体可达 2.7MB+，10 秒默认超时不够用
+  const res = await postJson(apiBase() + '/v2/groups/' + groupOpenid + '/files', {
+    file_type: 1,
+    srv_send_msg: false,
+    ...body,
+  }, token, 30000);
+  log.info(`[uploadGroupFile] 上传成功 file_info=${String(res.file_info || '').slice(0, 16)}... ttl=${res.ttl || 0}`);
+  return res;
 }
 
-// 发送群聊图片消息
-async function sendGroupImage(groupOpenid, fileUuid, msgId) {
+// 上传群聊图片：优先本地下载 + base64 直传；本地取不到（防盗链/超限/网络）
+// 就退一步让平台服务器按 url 代拉，别轻易放弃
+async function uploadGroupImage(groupOpenid, imageUrl) {
+  const imgBuf = await media.getImageData(imageUrl);
+  if (imgBuf) {
+    return uploadGroupFile(groupOpenid, { file_data: imgBuf.toString('base64') });
+  }
+  log.warn(`[uploadGroupImage] 本地下载失败，改用平台代拉: ${imageUrl}`);
+  return uploadGroupFile(groupOpenid, { url: media.jpegVariant(imageUrl, 720) || imageUrl });
+}
+
+// 发送群聊富媒体消息。msg_type 必须是 7（2 是 markdown），file_info 原样透传
+async function sendGroupImage(groupOpenid, fileInfo, msgId) {
   const token = await getAccessToken();
-  const body = { msg_type: 2, media: { file_info: fileUuid } };
+  const body = { msg_type: 7, media: { file_info: fileInfo } };
   if (msgId) {
     body.msg_id = msgId;
     body.msg_seq = nextMsgSeq(msgId);
@@ -235,7 +212,51 @@ async function sendGroupImage(groupOpenid, fileUuid, msgId) {
   return res;
 }
 
-function postJson(url, body, token) {
+// 发送一张图片到群的完整流程：file_info 缓存 → base64 上传 → 平台代拉 → 发送。
+// 失败返回 null（原因已写日志），不抛异常，方便推送主流程并发发多张图。
+async function sendGroupImageByUrl(groupOpenid, imageUrl, msgId) {
+  if (!groupOpenid || !imageUrl) return null;
+  const host = (() => { try { return new URL(imageUrl).hostname; } catch (e) { return imageUrl.slice(0, 40); } })();
+
+  // 命中 file_info 缓存就直接发，同一张封面在有效期内不重复上传
+  const hit = media.cachedFileInfo(imageUrl);
+  if (hit) {
+    try {
+      return await sendGroupImage(groupOpenid, hit, msgId);
+    } catch (e) {
+      log.warn(`[sendGroupImage] 缓存的 file_info 已失效，重新上传: ${e.message}`);
+      media.forgetFileInfo(imageUrl);
+    }
+  }
+
+  let up = null;
+  try {
+    up = await uploadGroupImage(groupOpenid, imageUrl);
+  } catch (e) {
+    log.warn(`[sendGroupImageByUrl] base64 上传失败 (${host}): ${e.message}`);
+  }
+  if (!up || !(up.file_info || up.file_uuid)) {
+    try {
+      up = await uploadGroupFile(groupOpenid, { url: media.jpegVariant(imageUrl, 720) || imageUrl });
+    } catch (e) {
+      log.warn(`[sendGroupImageByUrl] 平台代拉也失败 (${host}): ${e.message}`);
+    }
+  }
+  const fileInfo = up && (up.file_info || up.file_uuid);
+  if (!fileInfo) {
+    log.warn(`[sendGroupImageByUrl] 图片发送失败（两路上传都没拿到 file_info）: ${host}`);
+    return null;
+  }
+  media.rememberFileInfo(imageUrl, fileInfo, up.ttl);
+  try {
+    return await sendGroupImage(groupOpenid, fileInfo, msgId);
+  } catch (e) {
+    log.warn(`[sendGroupImageByUrl] 图片消息发送失败 (${host}): ${e.message}`);
+    return null;
+  }
+}
+
+function postJson(url, body, token, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
     const req = https.request(url, {
@@ -245,7 +266,7 @@ function postJson(url, body, token) {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(data),
       },
-      timeout: 10000,
+      timeout: timeoutMs,
     }, res => {
       let d = '';
       res.on('data', c => d += c);
@@ -657,4 +678,4 @@ function start(handler, port) {
   return server;
 }
 
-module.exports = { init, start, getCallbackUrl, getAccessToken, signMessage, verifySignature, deriveKeypair, setBotUser, getBotUserId: () => botConfig?._botUserId || null, sendToChannel, sendToGroup, sendToC2C, uploadGroupImage, sendGroupImage };
+module.exports = { init, start, getCallbackUrl, getAccessToken, signMessage, verifySignature, deriveKeypair, setBotUser, getBotUserId: () => botConfig?._botUserId || null, sendToChannel, sendToGroup, sendToC2C, uploadGroupFile, uploadGroupImage, sendGroupImage, sendGroupImageByUrl };

@@ -353,15 +353,13 @@ registerCommand('bili_fetch', {
           await proactiveSend(t, `⚠️ ${sub.name || sub.uid} 暂无动态`);
         } else {
           await proactiveSend(t, formatMsg(latest, sub.name || String(sub.uid)));
-          // 发送图片
+          // 发送图片（仅群聊；频道富媒体是另一套接口）
           if (latest.images && latest.images.length > 0 && t.targetType === 'group') {
             const maxImg = Math.min(latest.images.length, 3);
             for (let i = 0; i < maxImg; i++) {
               try {
-                const fileInfo = await server.uploadGroupImage(t.targetId, latest.images[i]);
-                if (fileInfo?.file_uuid) {
-                  await server.sendGroupImage(t.targetId, fileInfo.file_uuid);
-                }
+                const sent = await server.sendGroupImageByUrl(t.targetId, latest.images[i]);
+                if (!sent) log.warn('图片发送失败: ' + latest.images[i]);
               } catch (imgErr) {
                 log.warn('图片发送失败: ' + imgErr.message);
               }

@@ -63,6 +63,27 @@ function jpegVariant(url, maxW = 0) {
   return u;
 }
 
+// B站图床域名后缀白名单：只把这些域名的图内嵌进 Markdown 卡片，
+// 避免把任意第三方地址塞进消息（对齐 bili-notify 的 allowed_image_url）
+const IMG_HOST_SUFFIXES = ['.hdslb.com', '.bilivideo.com', '.biliimg.com'];
+
+/**
+ * 内嵌进 Markdown 的图片 URL：补协议 → 域名白名单 → webp/gif 转 jpg。
+ * 默认不压尺寸（bili-notify 同款默认）：平台转存的是原图，加 CDN 压缩参数
+ * 反而可能个别图床不兼容；QQ 只收 png/jpg 所以格式转换无条件生效。
+ * 域名不在白名单返回 ''（这种图走富媒体 base64 直传，不进卡片）。
+ */
+function inlineImageUrl(url) {
+  if (!url) return '';
+  let u = String(url).trim();
+  if (u.startsWith('//')) u = 'https:' + u;
+  if (u.startsWith('http://')) u = 'https://' + u.slice('http://'.length);
+  let host = '';
+  try { host = new URL(u).hostname.toLowerCase(); } catch (e) { return ''; }
+  if (!IMG_HOST_SUFFIXES.some(s => host.endsWith(s))) return '';
+  return jpegVariant(u, 0);
+}
+
 // ─── 短期磁盘缓存 ─────────────────────────────────────────────────────────────
 function ensureDirs() {
   for (const d of [CACHE_DIR, TMP_DIR]) {
@@ -163,4 +184,4 @@ function forgetFileInfo(url) {
   fileInfoCache.delete(key(url));
 }
 
-module.exports = { jpegVariant, getImageData, usable, cachedFileInfo, rememberFileInfo, forgetFileInfo, sweepTmp };
+module.exports = { jpegVariant, inlineImageUrl, getImageData, usable, cachedFileInfo, rememberFileInfo, forgetFileInfo, sweepTmp };

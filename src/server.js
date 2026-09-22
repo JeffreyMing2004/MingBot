@@ -158,6 +158,22 @@ async function sendToC2C(userOpenid, text, msgId) {
   return res;
 }
 
+// 群聊 Markdown 消息：msg_type=2 + markdown.content。
+// 自定义 Markdown 已对全部群聊机器人开放（无需申请模板，对齐 bili-notify 实测）。
+// 图片用 ![说明](url) 内嵌在 Markdown 里，开放平台会下载转存 —— 图文同一条消息。
+// 注意：内嵌格式（<@!id> 等）只在纯文本 content 生效，markdown 里不生效。
+async function sendGroupMarkdown(groupOpenid, markdown, msgId) {
+  const token = await getAccessToken();
+  const body = { msg_type: 2, markdown: { content: markdown } };
+  if (msgId) {
+    body.msg_id = msgId;
+    body.msg_seq = nextMsgSeq(msgId);
+  }
+  const res = await postJson(`${apiBase()}/v2/groups/${groupOpenid}/messages`, body, token);
+  log.info(`[sendGroupMarkdown] Markdown消息发送成功 id=${res.id || '-'}`);
+  return res;
+}
+
 async function sendToDms(guildId, text) {
   const token = await getAccessToken();
   const dms = await postJson(`${apiBase()}/users/@me/guilds`, {
@@ -678,4 +694,4 @@ function start(handler, port) {
   return server;
 }
 
-module.exports = { init, start, getCallbackUrl, getAccessToken, signMessage, verifySignature, deriveKeypair, setBotUser, getBotUserId: () => botConfig?._botUserId || null, sendToChannel, sendToGroup, sendToC2C, uploadGroupFile, uploadGroupImage, sendGroupImage, sendGroupImageByUrl };
+module.exports = { init, start, getCallbackUrl, getAccessToken, signMessage, verifySignature, deriveKeypair, setBotUser, getBotUserId: () => botConfig?._botUserId || null, sendToChannel, sendToGroup, sendToC2C, sendGroupMarkdown, uploadGroupFile, uploadGroupImage, sendGroupImage, sendGroupImageByUrl };

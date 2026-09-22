@@ -4,7 +4,7 @@
  */
 const axios = require('axios');
 const { registerCommand } = require('./commands');
-const { addSub, removeSub, listSub, searchUp, getUpName, saveBiliConfig, getApiStatus, fetchLatestDynamic, formatMsg } = require('./bilibili');
+const { addSub, removeSub, listSub, searchUp, getUpName, saveBiliConfig, getApiStatus, fetchLatestDynamic, formatMsg, formatDynamicMd, sendGroupCard } = require('./bilibili');
 const server = require('./server');
 const config = require('./config');
 const log = require('./logger');
@@ -351,20 +351,14 @@ registerCommand('bili_fetch', {
         const latest = await fetchLatestDynamic(sub.uid);
         if (!latest) {
           await proactiveSend(t, `⚠️ ${sub.name || sub.uid} 暂无动态`);
+        } else if (t.targetType === 'group') {
+          // 群聊：图文合一 Markdown 卡片（失败自动退纯文本+分开发图）
+          await sendGroupCard(t,
+            formatDynamicMd(latest, sub.name || String(sub.uid)),
+            formatMsg(latest, sub.name || String(sub.uid)),
+            latest.images);
         } else {
           await proactiveSend(t, formatMsg(latest, sub.name || String(sub.uid)));
-          // 发送图片（仅群聊；频道富媒体是另一套接口）
-          if (latest.images && latest.images.length > 0 && t.targetType === 'group') {
-            const maxImg = Math.min(latest.images.length, 3);
-            for (let i = 0; i < maxImg; i++) {
-              try {
-                const sent = await server.sendGroupImageByUrl(t.targetId, latest.images[i]);
-                if (!sent) log.warn('图片发送失败: ' + latest.images[i]);
-              } catch (imgErr) {
-                log.warn('图片发送失败: ' + imgErr.message);
-              }
-            }
-          }
         }
       } catch (e) {
         await proactiveSend(t, `❌ 获取 ${sub.name || sub.uid} 动态失败: ${e.message}`);

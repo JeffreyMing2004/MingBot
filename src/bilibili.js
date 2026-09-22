@@ -8,6 +8,7 @@ const LAST_LIVE_FILE = path.join(DATA_DIR, 'last_live.json');
 let biliConfig = { cookie: '', userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36' };
 const log = require('./logger');
 const server = require('./server');
+const media = require('./media');
 const RSSHUB_INSTANCES = ['https://rsshub.app', 'https://rsshub.rssforever.com'];
 
 function ensureDataDir() {
@@ -193,6 +194,67 @@ function formatMsg(d, upName) {
   return msg;
 }
 
+// ─── Markdown 卡片（图文合一，对齐 bili-notify 的排版规则）────────────────────
+// Markdown 转义：正文里这些符号会破坏卡片排版（标题/加粗/链接语法），直接去掉
+function mdEscape(s) {
+  return String(s || '').replace(/\r/g, '').replace(/[`*_#\[\]<>]/g, '').trim();
+}
+
+/** 动态推送的 Markdown 卡片：图片内嵌（![动态图片](url)），图文一条消息 */
+function formatDynamicMd(d, upName) {
+  const t = new Date(d.timestamp * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+  let md = `**🔔 ${mdEscape(upName)} 发布新动态**\n📅 ${t}\n`;
+  if (d.title) md += `📺 **${mdEscape(d.title)}**\n`;
+  if (d.text) {
+    const esc = mdEscape(d.text.slice(0, 500));
+    md += `${esc}${d.text.length > 500 ? '...' : ''}\n`;
+  }
+  if (d.originInfo) md += `🔁 转发自 @${mdEscape(d.originInfo.name)}\n`;
+  // 白名单内的图才内嵌（最多3张，与富媒体路径同上限）；alt 不能留空，图取不到时还能显示文字
+  const imgs = (d.images || []).map(u => media.inlineImageUrl(u)).filter(Boolean).slice(0, 3);
+  if (imgs.length) md += '\n' + imgs.map(u => `![动态图片](${u})`).join('\n') + '\n';
+  md += `\n🔗 [查看动态](${d.url})`;
+  return md;
+}
+
+/** 直播开播的 Markdown 卡片：封面内嵌 */
+function formatLiveMd(live, upName) {
+  let md = `**🔴 ${mdEscape(upName)} 开播了！**\n`;
+  if (live.area) md += `📺 直播分区：${mdEscape(live.area)}\n`;
+  if (live.title) md += `📝 直播标题：${mdEscape(live.title)}\n`;
+  const cover = media.inlineImageUrl(live.cover);
+  if (cover) md += `\n![直播封面](${cover})\n`;
+  md += `\n🔗 [进入直播间](${live.url})`;
+  return md;
+}
+
+/**
+ * 群聊图文合一发送（bili-notify 同款回落链）：
+ *   1. Markdown 卡片（图片内嵌，文字+图一条消息）
+ *   2. 失败（如未获 Markdown 权限）→ 纯文本 + 富媒体图片逐张发
+ * 返回 true 表示文字至少发出去了。
+ */
+async function sendGroupCard(target, markdown, plainText, imageUrls) {
+  const gid = target.targetId;
+  try {
+    await server.sendGroupMarkdown(gid, markdown);
+    return true;
+  } catch (e) {
+    log.warn(`[图文合一] Markdown 发送失败，退回纯文本+图片分开发: ${e.message}`);
+  }
+  let ok = false;
+  try {
+    await server.sendToGroup(gid, plainText);
+    ok = true;
+  } catch (e) {
+    log.error(`[图文合一] 纯文本也发送失败: ${e.message}`);
+  }
+  for (const url of (imageUrls || []).filter(Boolean).slice(0, 3)) {
+    try { await server.sendGroupImageByUrl(gid, url); } catch (e) { /* 内部已记日志 */ }
+  }
+  return ok;
+}
+
 
 /** 检测直播状态 */
 async function checkLive(uid) {
@@ -259,18 +321,14 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
           const _send = sendFn || (bot && bot.send && bot.send.channel ? (t, text) => bot.send.channel(t.targetId, text) : null);
           if (!_send) { log.error(`[B站监控] 无可用的消息发送函数，跳过发送`); continue; }
           try {
-            await _send(sub, formatMsg(latest, sub.name || uidStr));
-            // 发送图片（如果有，仅群聊；频道富媒体是另一套接口）
-            if (latest.images && latest.images.length > 0 && sub.targetType === 'group') {
-              const maxImg = Math.min(latest.images.length, 3); // 最多发3张
-              for (let i = 0; i < maxImg; i++) {
-                try {
-                  const sent = await server.sendGroupImageByUrl(sub.targetId, latest.images[i]);
-                  if (!sent) log.warn('[' + (sub.name || uidStr) + '] 图片发送失败: ' + latest.images[i]);
-                } catch (imgErr) {
-                  log.warn('[' + (sub.name || uidStr) + '] 图片发送失败: ' + imgErr.message);
-                }
-              }
+            if (sub.targetType === 'group') {
+              // 群聊：图文合一 Markdown 卡片（失败自动退纯文本+分开发图）
+              await sendGroupCard(sub,
+                formatDynamicMd(latest, sub.name || uidStr),
+                formatMsg(latest, sub.name || uidStr),
+                latest.images);
+            } else {
+              await _send(sub, formatMsg(latest, sub.name || uidStr));
             }
           }
           catch(e) { log.error(`发送动态到 ${targetLabel(sub)} 失败: ${e.message}`); }
@@ -292,15 +350,16 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
           const _send = sendFn || (bot && bot.send && bot.send.channel ? (t, text) => bot.send.channel(t.targetId, text) : null);
           if (_send) {
             try {
-              await _send(sub, formatLiveMsg(live, sub.name || uidStr));
+              if (sub.targetType === 'group') {
+                // 群聊：封面内嵌的 Markdown 卡片（失败退纯文本+封面单独发）
+                await sendGroupCard(sub,
+                  formatLiveMd(live, sub.name || uidStr),
+                  formatLiveMsg(live, sub.name || uidStr),
+                  [live.cover]);
+              } else {
+                await _send(sub, formatLiveMsg(live, sub.name || uidStr));
+              }
             } catch(e) { log.error('发送直播通知失败: ' + e.message); }
-            // 开播封面也发一份（仅群聊，走富媒体上传，同 bili-notify 的做法）
-            if (live.cover && sub.targetType === 'group') {
-              try {
-                const sent = await server.sendGroupImageByUrl(sub.targetId, live.cover);
-                if (!sent) log.warn('[' + (sub.name || uidStr) + '] 直播封面发送失败: ' + live.cover);
-              } catch(e) { log.warn('[' + (sub.name || uidStr) + '] 直播封面发送失败: ' + e.message); }
-            }
           }
         } else if (!live && lastLive[uidStr]) {
           log.bili('[' + (sub.name || uidStr) + '] 下播');
@@ -370,4 +429,4 @@ async function getUpName(uid) {
   } catch (e) { return null; }
 }
 
-function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, loadConfig, searchUp, getUpName, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, fetchLatestDynamic, formatMsg, checkLive, formatLiveMsg, CONFIG_FILE, COOKIE_FILE };
+function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, loadConfig, searchUp, getUpName, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, fetchLatestDynamic, formatMsg, formatDynamicMd, formatLiveMsg, formatLiveMd, sendGroupCard, checkLive, CONFIG_FILE, COOKIE_FILE };

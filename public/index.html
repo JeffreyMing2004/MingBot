@@ -42,17 +42,6 @@ tr:hover td{background:rgba(255,255,255,.02)}
 .btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text)}.btn-ghost:hover{border-color:var(--accent);color:var(--accent2)}
 .log-box{background:#0d0f14;border-radius:8px;padding:14px;font-family:'JetBrains Mono',Consolas,monospace;font-size:12px;line-height:1.7;max-height:320px;overflow-y:auto;color:var(--text2)}
 .log-box .log-error{color:var(--red)}.log-box .log-warn{color:var(--yellow)}.log-box .log-info{color:var(--green)}.log-box .log-event{color:var(--accent2)}
-.mode-compare{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.mode-box{background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:10px;padding:16px}
-.mode-box h3{font-size:15px;margin-bottom:10px;display:flex;align-items:center;gap:8px}
-.mode-box ul{list-style:none;font-size:13px;color:var(--text2)}
-.mode-box li{padding:4px 0;display:flex;align-items:flex-start;gap:8px}
-.mode-box li::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;margin-top:6px;flex-shrink:0}
-.mode-ws li::before{background:var(--green)}.mode-ws.active{border-color:var(--green)}
-.mode-wh li::before{background:var(--accent2)}.mode-wh.active{border-color:var(--accent2)}
-.mode-tag{font-size:11px;padding:2px 8px;border-radius:4px;margin-left:auto}
-.mode-ws .mode-tag{background:rgba(0,184,148,.15);color:var(--green)}
-.mode-wh .mode-tag{background:rgba(162,155,254,.15);color:var(--accent2)}
 .empty{text-align:center;color:var(--text2);padding:32px;font-size:13px}
 .flex{display:flex;align-items:center;gap:8px}
 .mt{margin-top:16px}
@@ -99,9 +88,10 @@ tr:hover td{background:rgba(255,255,255,.02)}
       订阅列表
     </div>
     <table>
-      <thead><tr><th>#</th><th>UP主</th><th>UID</th><th>目标</th><th>操作</th></tr></thead>
-      <tbody id="subsTable"><tr><td colspan="5" class="empty">加载中...</td></tr></tbody>
+      <thead><tr><th>#</th><th>UP主</th><th>UID</th><th>目标</th></tr></thead>
+      <tbody id="subsTable"><tr><td colspan="4" class="empty">加载中...</td></tr></tbody>
     </table>
+    <p style="margin-top:10px;font-size:12px;color:var(--text2)">💡 如需退订，在群里使用 <code style="color:var(--accent2)">/bili_unsub &lt;UID&gt;</code>（面板不提供删除操作，防止误点）</p>
   </div>
 
   <div class="card mb">
@@ -121,40 +111,6 @@ tr:hover td{background:rgba(255,255,255,.02)}
       实时日志
     </div>
     <div class="log-box" id="logBox">等待连接...</div>
-  </div>
-
-  <div class="card">
-    <div class="card-title">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-      WebSocket vs Webhook
-    </div>
-    <div class="mode-compare">
-      <div class="mode-box mode-ws" id="modeWs">
-        <h3>WebSocket 模式 <span class="mode-tag">默认</span></h3>
-        <ul>
-          <li>机器人主动连接 QQ 网关，维持长连接</li>
-          <li>无需公网 IP 或域名</li>
-          <li>消息收发延迟低（~100ms）</li>
-          <li>群聊主动消息：受限，需要群内有用户先 @机器人</li>
-          <li>频道消息：支持主动推送</li>
-          <li>适合：开发调试、小规模部署</li>
-        </ul>
-      </div>
-      <div class="mode-box mode-wh" id="modeWh">
-        <h3>Webhook 回调模式 <span class="mode-tag">当前</span></h3>
-        <ul>
-          <li>QQ 服务器主动 POST 事件到你的回调地址</li>
-          <li>需要公网可达的 URL（域名 + HTTPS）</li>
-          <li>消息收发延迟取决于网络（~200-500ms）</li>
-          <li>群聊主动消息：同样受限，需群内用户先 @机器人</li>
-          <li>可配合 Cloudflare Tunnel 免域名使用</li>
-          <li>适合：生产环境、多机器人管理</li>
-        </ul>
-      </div>
-    </div>
-    <p style="margin-top:14px;font-size:12px;color:var(--text2);line-height:1.8">
-      <strong style="color:var(--yellow)">关于群聊主动消息：</strong>QQ 群聊机器人的主动推送能力受平台限制，两种模式下都需要群内用户先 @机器人 后，机器人才能在该群发送消息。这不是代码问题，而是 QQ 开放平台对群聊机器人的策略限制。如需真正的主动推送，建议使用频道机器人或第三方推送服务（Server酱、PushPlus 等）。
-    </p>
   </div>
 </div>
 
@@ -179,7 +135,9 @@ async function loadStatus() {
   document.getElementById('biliStatus').innerHTML = `
     <div>Cookie: ${bs?.hasCookie ? '<span class="tag tag-green">已配置</span>' : '<span class="tag tag-red">未配置</span>'}</div>
     <div style="color:var(--text2);font-size:12px;margin-top:4px">${bs?.message || ''}</div>
+    <div id="cookieCountdown" style="margin-top:8px">⏳ 失效倒计时: 查询中...</div>
   `;
+  loadCookieCountdown();
 
   if (hb && hb.ok) {
     document.getElementById('hbUptime').textContent = hb.uptimeStr;
@@ -196,20 +154,56 @@ async function loadStatus() {
 async function loadSubs() {
   const data = await api('/api/subscriptions');
   const tbody = document.getElementById('subsTable');
-  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无订阅</td></tr>'; return; }
+  if (!data?.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty">暂无订阅</td></tr>'; return; }
   tbody.innerHTML = data.map((s, i) => `<tr>
     <td>${i+1}</td>
     <td><strong>${s.name || '未知'}</strong></td>
     <td><code style="color:var(--accent2)">${s.uid}</code></td>
     <td><span class="tag tag-blue">${s.targetType === 'group' ? '群聊' : '频道'}</span></td>
-    <td><button class="btn btn-danger btn-sm" onclick="removeSub(${s.uid},'${s.targetType}','${s.targetId}')">删除</button></td>
   </tr>`).join('');
 }
 
-async function removeSub(uid, type, targetId) {
-  if (!confirm('确定取消订阅 UID:' + uid + ' ?')) return;
-  await fetch(API + '/api/subscription', { method:'DELETE', headers:{'Content-Type':'application/json'}, body: JSON.stringify({uid, targetType:type, targetId}) });
-  loadSubs();
+// ─── Cookie 失效倒计时 ────────────────────────────────────────────────────────
+// expireTs 由后端从 SESSDATA 解析；前端每分钟本地刷新显示，接口结果缓存 5 分钟
+let cookieExpireTs = 0;
+
+async function loadCookieCountdown() {
+  const r = await api('/api/cookie-status');
+  const el = document.getElementById('cookieCountdown');
+  if (!el) return;
+  if (!r?.ok) { el.innerHTML = '⏳ 失效倒计时: <span class="tag tag-yellow">查询失败</span>'; return; }
+  if (!r.hasCookie) { el.innerHTML = '⏳ 失效倒计时: <span class="tag tag-red">未配置 Cookie</span>'; return; }
+  const acct = r.uname ? `（${escHtml(r.uname)}）` : '';
+  if (r.login === false) {
+    el.innerHTML = `⏳ 失效倒计时: <span class="tag tag-red">已失效${acct} — 接口校验未登录，请更新 Cookie</span>`;
+    return;
+  }
+  if (!r.expireTs) {
+    el.innerHTML = `⏳ 失效倒计时: <span class="tag tag-yellow">无法解析${acct}</span>`;
+    return;
+  }
+  cookieExpireTs = r.expireTs;
+  renderCookieCountdown(acct);
+  if (!renderCookieCountdown._timer) {
+    renderCookieCountdown._timer = setInterval(() => renderCookieCountdown(acct), 60000);
+  }
+}
+
+function renderCookieCountdown(acct) {
+  const el = document.getElementById('cookieCountdown');
+  if (!el || !cookieExpireTs) return;
+  const diff = cookieExpireTs - Date.now() / 1000;
+  if (diff <= 0) {
+    el.innerHTML = `⏳ 失效倒计时: <span class="tag tag-red">已失效${acct} — 请重新获取 Cookie（/bili_cookie）</span>`;
+    return;
+  }
+  const days = Math.floor(diff / 86400);
+  const hours = Math.floor((diff % 86400) / 3600);
+  const date = new Date(cookieExpireTs * 1000).toLocaleDateString('zh-CN');
+  const label = days > 0 ? `${days} 天 ${hours} 小时` : `${Math.floor(diff / 3600)} 小时 ${Math.floor((diff % 3600) / 60)} 分钟`;
+  const cls = days <= 7 ? 'tag-red' : days <= 30 ? 'tag-yellow' : 'tag-green';
+  const warn = days <= 7 ? ' — 请尽快更新 Cookie' : '';
+  el.innerHTML = `⏳ 失效倒计时: <span class="tag ${cls}">${label}</span> <span style="color:var(--text2);font-size:12px">（${date} 到期${warn}）${acct}</span>`;
 }
 
 async function loadCommands() {

@@ -466,26 +466,20 @@ function createServer(handler, secret) {
           res.end(JSON.stringify(loadConfig()));
           return;
         }
-    
-        if (req.url === '/api/subscription' && req.method === 'DELETE') {
-          let body = '';
-          req.on('data', c => body += c);
-          req.on('end', () => {
-            try {
-              const { uid, targetType, targetId } = JSON.parse(body);
-              const { removeSub } = require('./bilibili');
-              const target = { targetType, targetId };
-              removeSub(target, uid);
-              res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ ok: true }));
-            } catch(e) {
-              res.writeHead(400, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: e.message }));
-            }
+
+        // Cookie 失效倒计时：SESSDATA 解析失效时间戳 + nav 查登录昵称
+        if (req.url === '/api/cookie-status' && req.method === 'GET') {
+          const { getCookieStatus } = require('./bilibili');
+          getCookieStatus().then(status => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, ...status }));
+          }).catch(e => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: e.message }));
           });
           return;
         }
-    
+
         if (req.url === '/api/commands' && req.method === 'GET') {
           const { getAllCommands } = require('./commands');
           const seen = new Set();

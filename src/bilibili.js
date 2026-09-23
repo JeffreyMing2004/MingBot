@@ -435,4 +435,46 @@ async function getUpName(uid) {
   } catch (e) { return null; }
 }
 
-function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, loadConfig, searchUp, getUpName, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, fetchLatestDynamic, formatMsg, formatDynamicMd, formatLiveMsg, formatLiveMd, sendGroupCard, checkLive, CONFIG_FILE, COOKIE_FILE };
+// ─── Cookie 失效倒计时 ────────────────────────────────────────────────────────
+// SESSDATA 本身形如 <token>,<expire_ts>,<校验段>，第二段就是失效时间戳（Unix秒），
+// 解析即可得，不用调接口。昵称/登录态再调 nav 接口确认（失败不影响倒计时）。
+function parseSessdataExpiry(cookie) {
+  const m = String(cookie || '').match(/SESSDATA=([^;]+)/);
+  if (!m) return 0;
+  let val = m[1].trim();
+  try { val = decodeURIComponent(val); } catch (e) { /* 保持原样继续解析 */ }
+  const ts = parseInt(String(val).split(',')[1], 10);
+  // 合理性：10 位 Unix 秒（2001~2096），不是就当解析失败
+  return (ts > 1e9 && ts < 4e9) ? ts : 0;
+}
+
+// 面板刷新很勤，nav 接口结果缓存 5 分钟，别把 B站接口打爆
+let _cookieStatusCache = { at: 0, data: null };
+
+async function getCookieStatus() {
+  if (_cookieStatusCache.data && Date.now() - _cookieStatusCache.at < 300_000) {
+    return _cookieStatusCache.data;
+  }
+  if (!biliConfig.cookie) loadBiliConfig();
+  const out = {
+    hasCookie: !!biliConfig.cookie,
+    expireTs: parseSessdataExpiry(biliConfig.cookie),
+    login: null,     // null = 未知（接口没查到）
+    uname: '',
+  };
+  if (out.hasCookie) {
+    try {
+      const res = await fetch('https://api.bilibili.com/x/web-interface/nav', {
+        headers: { 'User-Agent': biliConfig.userAgent, 'Referer': 'https://www.bilibili.com/', 'Cookie': biliConfig.cookie },
+        signal: AbortSignal.timeout(8000),
+      });
+      const data = await res.json();
+      out.login = data?.data?.isLogin === true;
+      out.uname = data?.data?.uname || '';
+    } catch (e) { /* 网络失败不算失效，只少个昵称 */ }
+  }
+  _cookieStatusCache = { at: Date.now(), data: out };
+  return out;
+}
+
+function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, loadConfig, searchUp, getUpName, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, getCookieStatus, parseSessdataExpiry, fetchLatestDynamic, formatMsg, formatDynamicMd, formatLiveMsg, formatLiveMd, sendGroupCard, checkLive, CONFIG_FILE, COOKIE_FILE };

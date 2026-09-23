@@ -84,6 +84,134 @@ function inlineImageUrl(url) {
   return jpegVariant(u, 0);
 }
 
+// ─── Markdown 图片尺寸提示（移植 bili-notify v1.40.0 的手机端修复）───────────
+// QQ 的 markdown 图片是私有语法，必须带尺寸提示：![#宽px #高px](url)。
+// 缺了它客户端不为图片预留空间 —— 电脑端正常、手机端一片空白
+// （QQ 官方插件 openclaw-qqbot 的 formatQQBotMarkdownImage 同款拼法）。
+
+const SIZE_HINT_W = 672;      // 封面/配图最大宽度（等比缩，不放大）
+const SIZE_HINT_MAX_H = 1200; // 高度硬上限：超长图整体等比压进来，手机免滑几屏
+
+/** 从 B站图床 URL 的 @参数解析原图宽高（@518w_518h_1c.webp → 518×518） */
+function srcSizeFromUrl(url) {
+  const m = String(url || '').match(/@(\d+)w_(\d+)h/);
+  if (!m) return null;
+  const w = parseInt(m[1], 10);
+  const h = parseInt(m[2], 10);
+  return (w > 0 && h > 0) ? { w, h } : null;
+}
+
+/** 从图片文件头解析真实宽高（PNG/GIF/WebP/JPEG），解析不到返回 null */
+function parseSizeFromBytes(b) {
+  try {
+    if (!b || b.length < 10) return null;
+    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) {
+      if (b.length >= 24 && b.toString('ascii', 12, 16) === 'IHDR') {
+        return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+      }
+      return null;
+    }
+    if (b.toString('ascii', 0, 3) === 'GIF') {
+      return { w: b.readUInt16LE(6), h: b.readUInt16LE(8) };
+    }
+    if (b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP') {
+      const fmt = b.toString('ascii', 12, 16);
+      if (fmt === 'VP8X' && b.length >= 30) {
+        return { w: b.readUIntLE(24, 3) + 1, h: b.readUIntLE(27, 3) + 1 };
+      }
+      if (fmt === 'VP8 ' && b.length >= 30) {
+        return { w: b.readUInt16LE(26) & 0x3fff, h: b.readUInt16LE(28) & 0x3fff };
+      }
+      if (fmt === 'VP8L' && b.length >= 25) {
+        const bits = b.readUInt32LE(21);
+        return { w: (bits & 0x3fff) + 1, h: ((bits >>> 14) & 0x3fff) + 1 };
+      }
+      return null;
+    }
+    if (b[0] === 0xff && b[1] === 0xd8) {          // JPEG：扫描 SOFn 段
+      let i = 2;
+      const n = b.length;
+      while (i < n - 9) {
+        if (b[i] !== 0xff) { i++; continue; }
+        const mk = b[i + 1];
+        if (mk === 0xd8 || mk === 0x01 || (mk >= 0xd0 && mk <= 0xd7)) { i += 2; continue; }
+        if (i + 4 > n) break;
+        const seglen = b.readUInt16BE(i + 2);
+        if (mk >= 0xc0 && mk <= 0xcf && mk !== 0xc4 && mk !== 0xc8 && mk !== 0xcc) {
+          if (i + 9 <= n) return { w: b.readUInt16BE(i + 7), h: b.readUInt16BE(i + 5) };
+          break;
+        }
+        if (seglen <= 0) break;
+        i += 2 + seglen;
+      }
+    }
+  } catch (e) { /* 解析失败等同未知尺寸，由调用方兜底 */ }
+  return null;
+}
+
+// 探测结果缓存（含负结果，避免每次推送白等一次超时）
+const sizeProbeCache = new Map();
+
+/** 下载图片头部 64KB 读真实宽高。只在自己发出去的 URL 上探，失败返回 null，绝不影响发送 */
+async function probeImageSize(url, timeoutMs = 2000) {
+  if (!url) return null;
+  if (sizeProbeCache.has(url)) return sizeProbeCache.get(url);
+  let sz = null;
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': UA, 'Referer': 'https://www.bilibili.com/', 'Range': 'bytes=0-65535' },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (res.ok || res.status === 206) {
+      sz = parseSizeFromBytes(Buffer.from(await res.arrayBuffer()));
+    }
+  } catch (e) { sz = null; }
+  sizeProbeCache.set(url, sz);
+  return sz;
+}
+
+/** 按原图比例给尺寸提示：已知宽高按 672 等比缩（不放大），未知退 16:9；
+ * 超高长图（如竖版截图）整体等比压到 1200 高，手机免滑几屏 */
+function hintSize(ow = 0, oh = 0) {
+  let w;
+  let h;
+  if (ow > 0 && oh > 0) {
+    if (ow <= SIZE_HINT_W) { w = ow; h = oh; }        // 不放大：小图保持原尺寸
+    else { w = SIZE_HINT_W; h = Math.round(SIZE_HINT_W * oh / ow); }
+  } else {
+    w = SIZE_HINT_W;
+    h = Math.round(SIZE_HINT_W * 9 / 16);
+  }
+  if (SIZE_HINT_MAX_H > 0 && h > SIZE_HINT_MAX_H) {   // 等比压缩，比例不变
+    w = Math.max(1, Math.round(w * SIZE_HINT_MAX_H / h));
+    h = SIZE_HINT_MAX_H;
+  }
+  return { w: Math.max(w, 1), h: Math.max(h, 1) };
+}
+
+/**
+ * 生成一行 QQ 私有语法的 Markdown 图片：![#宽px #高px](url)。
+ * probe=true（动态配图等比例不定时）会联网探测真实尺寸；
+ * 封面类本就 16:9，传 false 省一次网络请求（对齐 bili-notify 的策略）。
+ * URL 不过白名单返回 ''（这种图走富媒体 base64 直传）。
+ */
+async function mdImageLine(srcUrl, { probe = true } = {}) {
+  const url = inlineImageUrl(srcUrl);
+  if (!url) return '';
+  let ow = 0;
+  let oh = 0;
+  const fromUrl = srcSizeFromUrl(srcUrl);
+  if (fromUrl) {
+    ow = fromUrl.w;
+    oh = fromUrl.h;
+  } else if (probe) {
+    const probed = await probeImageSize(url);
+    if (probed) { ow = probed.w; oh = probed.h; }
+  }
+  const { w, h } = hintSize(ow, oh);
+  return `![#${w}px #${h}px](${url})`;
+}
+
 // ─── 短期磁盘缓存 ─────────────────────────────────────────────────────────────
 function ensureDirs() {
   for (const d of [CACHE_DIR, TMP_DIR]) {
@@ -184,4 +312,4 @@ function forgetFileInfo(url) {
   fileInfoCache.delete(key(url));
 }
 
-module.exports = { jpegVariant, inlineImageUrl, getImageData, usable, cachedFileInfo, rememberFileInfo, forgetFileInfo, sweepTmp };
+module.exports = { jpegVariant, inlineImageUrl, srcSizeFromUrl, parseSizeFromBytes, probeImageSize, hintSize, mdImageLine, getImageData, usable, cachedFileInfo, rememberFileInfo, forgetFileInfo, sweepTmp };

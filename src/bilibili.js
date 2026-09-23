@@ -200,8 +200,9 @@ function mdEscape(s) {
   return String(s || '').replace(/\r/g, '').replace(/[`*_#\[\]<>]/g, '').trim();
 }
 
-/** 动态推送的 Markdown 卡片：图片内嵌（![动态图片](url)），图文一条消息 */
-function formatDynamicMd(d, upName) {
+/** 动态推送的 Markdown 卡片：图片内嵌（QQ 私有尺寸提示语法），图文一条消息。
+ * 动态配图竖图/方图比例不定，需要联网探测真实尺寸，故为 async。 */
+async function formatDynamicMd(d, upName) {
   const t = new Date(d.timestamp * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
   let md = `**🔔 ${mdEscape(upName)} 发布新动态**\n📅 ${t}\n`;
   if (d.title) md += `📺 **${mdEscape(d.title)}**\n`;
@@ -210,20 +211,25 @@ function formatDynamicMd(d, upName) {
     md += `${esc}${d.text.length > 500 ? '...' : ''}\n`;
   }
   if (d.originInfo) md += `🔁 转发自 @${mdEscape(d.originInfo.name)}\n`;
-  // 白名单内的图才内嵌（最多3张，与富媒体路径同上限）；alt 不能留空，图取不到时还能显示文字
-  const imgs = (d.images || []).map(u => media.inlineImageUrl(u)).filter(Boolean).slice(0, 3);
-  if (imgs.length) md += '\n' + imgs.map(u => `![动态图片](${u})`).join('\n') + '\n';
+  // 白名单内的图才内嵌（最多3张，与富媒体路径同上限）
+  const lines = [];
+  for (const u of (d.images || [])) {
+    if (lines.length >= 3) break;
+    const line = await media.mdImageLine(u, { probe: true });
+    if (line) lines.push(line);
+  }
+  if (lines.length) md += '\n' + lines.join('\n') + '\n';
   md += `\n🔗 [查看动态](${d.url})`;
   return md;
 }
 
-/** 直播开播的 Markdown 卡片：封面内嵌 */
-function formatLiveMd(live, upName) {
+/** 直播开播的 Markdown 卡片：封面内嵌。封面本就 16:9，不探测尺寸省一次网络。 */
+async function formatLiveMd(live, upName) {
   let md = `**🔴 ${mdEscape(upName)} 开播了！**\n`;
   if (live.area) md += `📺 直播分区：${mdEscape(live.area)}\n`;
   if (live.title) md += `📝 直播标题：${mdEscape(live.title)}\n`;
-  const cover = media.inlineImageUrl(live.cover);
-  if (cover) md += `\n![直播封面](${cover})\n`;
+  const cover = await media.mdImageLine(live.cover, { probe: false });
+  if (cover) md += `\n${cover}\n`;
   md += `\n🔗 [进入直播间](${live.url})`;
   return md;
 }
@@ -324,7 +330,7 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
             if (sub.targetType === 'group') {
               // 群聊：图文合一 Markdown 卡片（失败自动退纯文本+分开发图）
               await sendGroupCard(sub,
-                formatDynamicMd(latest, sub.name || uidStr),
+                await formatDynamicMd(latest, sub.name || uidStr),
                 formatMsg(latest, sub.name || uidStr),
                 latest.images);
             } else {
@@ -353,7 +359,7 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
               if (sub.targetType === 'group') {
                 // 群聊：封面内嵌的 Markdown 卡片（失败退纯文本+封面单独发）
                 await sendGroupCard(sub,
-                  formatLiveMd(live, sub.name || uidStr),
+                  await formatLiveMd(live, sub.name || uidStr),
                   formatLiveMsg(live, sub.name || uidStr),
                   [live.cover]);
               } else {

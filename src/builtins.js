@@ -354,7 +354,7 @@ registerCommand('bili_fetch', {
         } else if (t.targetType === 'group') {
           // 群聊：图文合一 Markdown 卡片（失败自动退纯文本+分开发图）
           await sendGroupCard(t,
-            formatDynamicMd(latest, sub.name || String(sub.uid)),
+            await formatDynamicMd(latest, sub.name || String(sub.uid)),
             formatMsg(latest, sub.name || String(sub.uid)),
             latest.images);
         } else {

@@ -103,6 +103,32 @@ function shouldPushDynamic(uid, d) {
   if (baseline?.ts > 0 && d.timestamp > 0 && d.timestamp < baseline.ts) return false;
   return true;
 }
+
+// ─── 开播回声静默（移植 bili-notify _silence_after_push）─────────────────────
+// 根因链（bili-notify bilibili.py 注释原话："开播卡片动态（B站开播时自动发，下播后删掉）"）：
+//   开播 → B站自动发开播动态，若它被当新动态推送并占据基线
+//   → 下播 → B站把这条动态删掉 → feed 第一条变回之前的真实动态
+//   → 和基线对不上 → 之前的动态被当"新动态"推出去（用户报的"直播结束后发之前的动态"）
+// pickLatestItem 已按类型跳过开播动态；这层时间窗兜底防类型识别不住的变体：
+// 刚推过开播通知，时间窗内新出现的动态多半就是 B站自动发的那条 → 静默。
+// ⚠️ 副作用：UP 开播后几分钟内手发的动态也会被吞 —— bili-notify 同款取舍。
+const LIVE_ECHO_WINDOW_MS = 15 * 60 * 1000;
+let liveNotifyAt = {};   // {uid: 开播通知时间ms}，内存即可（重启后顶多多推一条，无害）
+
+function markLiveNotified(uid) {
+  liveNotifyAt[String(uid)] = Date.now();
+}
+
+function silenceLiveEcho(uid, d) {
+  const t = liveNotifyAt[String(uid)];
+  if (!t || Date.now() - t > LIVE_ECHO_WINDOW_MS) return false;
+  const pub = (d.timestamp || 0) * 1000;
+  // 取不到发布时间就不敢静默 —— 宁可重复也不能吞真动态（bili-notify 同原则）
+  if (!pub) return false;
+  // 发布明显早于开播通知 → 是更早的旧动态，交给基线时间戳守卫处理，这里不吞
+  if (pub < t - 60_000) return false;
+  return true;
+}
 function loadBiliConfig() {
   ensureDataDir();
   if (fs.existsSync(COOKIE_FILE)) {
@@ -465,6 +491,11 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
             // 基线只前移不后移，防止旧数据把基线拖回去导致反复横跳
             const ts = latest.timestamp || 0;
             if (ts >= (baseline.ts || 0)) lastDynamics[uidStr] = { id: String(latest.dynamicId), ts: ts || baseline.ts || Math.floor(Date.now() / 1000) };
+          } else if (silenceLiveEcho(uidStr, latest)) {
+            // 刚推过开播通知，时间窗内冒出来的动态 = B站自动发的开播动态（变体），静默
+            log.bili(`[${sub.name || uidStr}] 静默开播回声动态 ${latest.dynamicId}`);
+            const ts = latest.timestamp || Math.floor(Date.now() / 1000);
+            if (ts >= (baseline.ts || 0)) lastDynamics[uidStr] = { id: String(latest.dynamicId), ts };
           } else {
             log.bili(`[${sub.name || uidStr}] 新动态: ${latest.dynamicId} title="${latest.title || (latest.text && latest.text.slice(0,30))}"`);
             const _send = sendFn || (bot && bot.send && bot.send.channel ? (t, text) => bot.send.channel(t.targetId, text) : null);
@@ -501,19 +532,23 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
           // 新开播
           log.bili('[' + (sub.name || uidStr) + '] 开播: ' + live.title);
           const _send = sendFn || (bot && bot.send && bot.send.channel ? (t, text) => bot.send.channel(t.targetId, text) : null);
+          let notified = false;
           if (_send) {
             try {
               if (sub.targetType === 'group') {
                 // 群聊：封面内嵌的 Markdown 卡片（失败退纯文本+封面单独发）
-                await sendGroupCard(sub,
+                notified = !!await sendGroupCard(sub,
                   await formatLiveMd(live, sub.name || uidStr),
                   formatLiveMsg(live, sub.name || uidStr),
                   [live.cover]);
               } else {
                 await _send(sub, formatLiveMsg(live, sub.name || uidStr));
+                notified = true;
               }
             } catch(e) { log.error('发送直播通知失败: ' + e.message); }
           }
+          // 开播通知真发出去了才开时间窗，用于静默 B站自动发的开播动态
+          if (notified) markLiveNotified(uidStr);
         } else if (!live && lastLive[uidStr]) {
           // 下播：补一条开始/结束时间、播了多久（开播时间取开播时记录的）
           const prev = lastLive[uidStr];
@@ -640,4 +675,4 @@ async function getCookieStatus() {
   return out;
 }
 
-function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, loadConfig, searchUp, getUpName, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, getCookieStatus, parseSessdataExpiry, isDynamicPushed, markDynamicPushed, recordPushedDynamic, shouldPushDynamic, pickLatestItem, parseRssItems, firstDynamicFromRss, fmtDuration, fetchLatestDynamic, formatMsg, formatDynamicMd, formatLiveMsg, formatLiveMd, formatLiveEndMsg, sendGroupCard, checkLive, CONFIG_FILE, COOKIE_FILE };
+function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, loadConfig, searchUp, getUpName, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, getCookieStatus, parseSessdataExpiry, isDynamicPushed, markDynamicPushed, recordPushedDynamic, shouldPushDynamic, silenceLiveEcho, markLiveNotified, pickLatestItem, parseRssItems, firstDynamicFromRss, fmtDuration, fetchLatestDynamic, formatMsg, formatDynamicMd, formatLiveMsg, formatLiveMd, formatLiveEndMsg, sendGroupCard, checkLive, CONFIG_FILE, COOKIE_FILE };

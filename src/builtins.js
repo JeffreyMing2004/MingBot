@@ -360,10 +360,16 @@ registerCommand('bili_fetch', {
             await formatDynamicMd(latest, sub.name || String(sub.uid)),
             formatMsg(latest, sub.name || String(sub.uid)),
             latest.images);
-          recordPushedDynamic(sub.uid, latest);
+          recordPushedDynamic(sub.uid, latest, {
+            name: sub.name || String(sub.uid),
+            target: (t.targetType || 'group') + ':' + String(t.targetId || '').slice(0, 8),
+          });
         } else {
           await proactiveSend(t, formatMsg(latest, sub.name || String(sub.uid)));
-          recordPushedDynamic(sub.uid, latest);
+          recordPushedDynamic(sub.uid, latest, {
+            name: sub.name || String(sub.uid),
+            target: (t.targetType || 'group') + ':' + String(t.targetId || '').slice(0, 8),
+          });
         }
       } catch (e) {
         await proactiveSend(t, `❌ 获取 ${sub.name || sub.uid} 动态失败: ${e.message}`);

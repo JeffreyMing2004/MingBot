@@ -9,6 +9,7 @@ const config = require('./config');
 const { setReplyFn } = require('./builtins');
 const { executeCommand, getAllCommands } = require('./commands');
 const { startMonitor } = require('./bilibili');
+const history = require('./history');
 const log = require('./logger');
 const callbackServer = require('./server');
 
@@ -99,6 +100,9 @@ async function start() {
   // 3. 启动 B站监控（群聊和频道都能推送）
   startMonitor(null, 1, makeSendToTarget());
   log.info('[MONITOR] B站动态监控已启动');
+
+  // 4. 动态推送历史定时同步到仓库
+  history.startAutoPush();
 }
 
 process.on('SIGINT', async () => {

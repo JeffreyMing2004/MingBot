@@ -9,6 +9,7 @@ let biliConfig = { cookie: '', userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; 
 const log = require('./logger');
 const server = require('./server');
 const media = require('./media');
+const history = require('./history');
 const RSSHUB_INSTANCES = ['https://rsshub.app', 'https://rsshub.rssforever.com'];
 
 function ensureDataDir() {
@@ -82,14 +83,16 @@ function saveLastDynamics() {
   try { fs.writeFileSync(LAST_FILE, JSON.stringify(lastDynamics, null, 2)); } catch(e) {}
 }
 
-/** 推送完成后记录：入已推送历史 + 前移监控基线（fetch 和监控共用，防止对方再发） */
-function recordPushedDynamic(uid, d) {
+/** 推送完成后记录：入已推送历史 + 前移监控基线（fetch 和监控共用，防止对方再发）。
+ * meta 可选 {name, target}，随内容一起写进推送历史文件（定时同步到仓库）。 */
+function recordPushedDynamic(uid, d, meta) {
   const u = String(uid);
   markDynamicPushed(u, d.dynamicId);
   const ts = d.timestamp || Math.floor(Date.now() / 1000);
   const cur = lastDynamics[u];
   if (!cur || ts >= (cur.ts || 0)) lastDynamics[u] = { id: String(d.dynamicId), ts };
   saveLastDynamics();
+  history.recordDynamic(u, meta && meta.name, d, meta && meta.target);
 }
 
 /**
@@ -512,7 +515,10 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
                 await _send(sub, formatMsg(latest, sub.name || uidStr));
               }
               // 只有真发出去才记录/前移基线；失败的下一轮重试，避免动态丢失
-              if (sent) recordPushedDynamic(uidStr, latest);
+              if (sent) recordPushedDynamic(uidStr, latest, {
+                name: sub.name || uidStr,
+                target: (sub.targetType || 'group') + ':' + String(sub.targetId || '').slice(0, 8),
+              });
               else log.warn(`[${sub.name || uidStr}] 动态 ${latest.dynamicId} 发送失败，下轮重试`);
             }
             catch(e) { log.error(`发送动态到 ${targetLabel(sub)} 失败: ${e.message}`); }

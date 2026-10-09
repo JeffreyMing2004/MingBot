@@ -27,8 +27,9 @@ run_*.bat
 config.json
 cookie.json
 
-# Data files
-data/
+# Data files（其余运行时数据含订阅/缓存不进仓库，仅白名单同步推送历史）
+data/*
+!data/pushed_history.json
 
 # Cloudflare tunnel
 cloudflared.yml

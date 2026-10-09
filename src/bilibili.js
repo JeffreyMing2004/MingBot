@@ -34,6 +34,75 @@ function loadConfig() {
   return [];
 }
 function saveConfig(data) { ensureDataDir(); fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2)); }
+
+// ─── 已推送动态去重 ───────────────────────────────────────────────────────────
+// 为什么需要：/bili_fetch 之前不查重，每跑一次就把最新动态重发一遍；
+// 官方API失败回退RSSHub时，RSS缓存/置顶还可能给出**更旧**的条目 ——
+// id不等于基线就被当新动态推送，表现就是"直播结束后把之前的版本再发一遍"。
+const PUSHED_FILE = path.join(DATA_DIR, 'pushed_dynamics.json');
+const PUSHED_KEEP = 50;   // 每个UP最多记这么多条已推送id
+
+let pushedMap = (() => {
+  try { return JSON.parse(fs.readFileSync(PUSHED_FILE, 'utf-8')); } catch(e) { return {}; }
+})();
+
+function savePushedMap() {
+  ensureDataDir();
+  try { fs.writeFileSync(PUSHED_FILE, JSON.stringify(pushedMap)); } catch(e) {}
+}
+
+function isDynamicPushed(uid, dynamicId) {
+  const u = pushedMap[String(uid)];
+  return !!u && !!u[String(dynamicId)];
+}
+
+function markDynamicPushed(uid, dynamicId) {
+  const u = String(uid);
+  const d = String(dynamicId || '');
+  if (!u || !d || d === 'undefined') return;
+  const m = pushedMap[u] = (pushedMap[u] || {});
+  m[d] = Date.now();
+  const entries = Object.entries(m).sort((a, b) => b[1] - a[1]);
+  if (entries.length > PUSHED_KEEP) pushedMap[u] = Object.fromEntries(entries.slice(0, PUSHED_KEEP));
+  savePushedMap();
+}
+
+// 基线升级为 {id, ts}（ts=已推送动态的发布时间，秒）。旧格式纯字符串自动迁移。
+// ts 用来识别"比已推送的还旧"的回退数据：直接跳过，且不把基线降级到旧的。
+let lastDynamics = (() => {
+  try {
+    const raw = JSON.parse(fs.readFileSync(LAST_FILE, 'utf-8'));
+    for (const k of Object.keys(raw)) if (typeof raw[k] === 'string') raw[k] = { id: raw[k], ts: 0 };
+    return raw;
+  } catch(e) { return {}; }
+})();
+
+function saveLastDynamics() {
+  ensureDataDir();
+  try { fs.writeFileSync(LAST_FILE, JSON.stringify(lastDynamics, null, 2)); } catch(e) {}
+}
+
+/** 推送完成后记录：入已推送历史 + 前移监控基线（fetch 和监控共用，防止对方再发） */
+function recordPushedDynamic(uid, d) {
+  const u = String(uid);
+  markDynamicPushed(u, d.dynamicId);
+  const ts = d.timestamp || Math.floor(Date.now() / 1000);
+  const cur = lastDynamics[u];
+  if (!cur || ts >= (cur.ts || 0)) lastDynamics[u] = { id: String(d.dynamicId), ts };
+  saveLastDynamics();
+}
+
+/**
+ * 判断该动态是否该推送（监控与 fetch 共用的去重判据）：
+ *   已推送过的 id → false；发布时间早于已推送基线（回退源旧数据）→ false
+ */
+function shouldPushDynamic(uid, d) {
+  const u = String(uid);
+  if (isDynamicPushed(u, d.dynamicId)) return false;
+  const baseline = lastDynamics[u];
+  if (baseline?.ts > 0 && d.timestamp > 0 && d.timestamp < baseline.ts) return false;
+  return true;
+}
 function loadBiliConfig() {
   ensureDataDir();
   if (fs.existsSync(COOKIE_FILE)) {
@@ -306,10 +375,6 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
   log.bili(`B站监控启动 (${intervalMinutes}分钟间隔)`);
   loadBiliConfig();
   if (!biliConfig.cookie) log.warn('未配置Cookie，将尝试第三方API（成功率较低）');
-  let lastDynamics = {};
-  try {
-    if (fs.existsSync(LAST_FILE)) lastDynamics = JSON.parse(fs.readFileSync(LAST_FILE, 'utf-8'));
-  } catch(e) {}
   let lastLive = {};
   try {
     if (fs.existsSync(LAST_LIVE_FILE)) lastLive = JSON.parse(fs.readFileSync(LAST_LIVE_FILE, 'utf-8'));
@@ -322,23 +387,35 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
       try {
         const latest = await fetchLatestDynamic(sub.uid);
         if (!latest) { log.bili(`[${sub.name || uidStr}] 暂无动态`); continue; }
-        if (latest.dynamicId !== lastDynamics[uidStr]) {
-          log.bili(`[${sub.name || uidStr}] 新动态: ${latest.dynamicId} title="${latest.title || (latest.text && latest.text.slice(0,30))}"`);
-          const _send = sendFn || (bot && bot.send && bot.send.channel ? (t, text) => bot.send.channel(t.targetId, text) : null);
-          if (!_send) { log.error(`[B站监控] 无可用的消息发送函数，跳过发送`); continue; }
-          try {
-            if (sub.targetType === 'group') {
-              // 群聊：图文合一 Markdown 卡片（失败自动退纯文本+分开发图）
-              await sendGroupCard(sub,
-                await formatDynamicMd(latest, sub.name || uidStr),
-                formatMsg(latest, sub.name || uidStr),
-                latest.images);
-            } else {
-              await _send(sub, formatMsg(latest, sub.name || uidStr));
+        const baseline = lastDynamics[uidStr] || {};
+        if (latest.dynamicId !== baseline.id) {
+          if (!shouldPushDynamic(uidStr, latest)) {
+            // 已推送过的 id，或回退源（RSSHub/置顶）给的比已推送基线还旧的条目
+            log.bili(`[${sub.name || uidStr}] 跳过已推送/过期动态 ${latest.dynamicId}`);
+            // 基线只前移不后移，防止旧数据把基线拖回去导致反复横跳
+            const ts = latest.timestamp || 0;
+            if (ts >= (baseline.ts || 0)) lastDynamics[uidStr] = { id: String(latest.dynamicId), ts: ts || baseline.ts || Math.floor(Date.now() / 1000) };
+          } else {
+            log.bili(`[${sub.name || uidStr}] 新动态: ${latest.dynamicId} title="${latest.title || (latest.text && latest.text.slice(0,30))}"`);
+            const _send = sendFn || (bot && bot.send && bot.send.channel ? (t, text) => bot.send.channel(t.targetId, text) : null);
+            if (!_send) { log.error(`[B站监控] 无可用的消息发送函数，跳过发送`); continue; }
+            try {
+              let sent = true;
+              if (sub.targetType === 'group') {
+                // 群聊：图文合一 Markdown 卡片（失败自动退纯文本+分开发图）
+                sent = await sendGroupCard(sub,
+                  await formatDynamicMd(latest, sub.name || uidStr),
+                  formatMsg(latest, sub.name || uidStr),
+                  latest.images);
+              } else {
+                await _send(sub, formatMsg(latest, sub.name || uidStr));
+              }
+              // 只有真发出去才记录/前移基线；失败的下一轮重试，避免动态丢失
+              if (sent) recordPushedDynamic(uidStr, latest);
+              else log.warn(`[${sub.name || uidStr}] 动态 ${latest.dynamicId} 发送失败，下轮重试`);
             }
+            catch(e) { log.error(`发送动态到 ${targetLabel(sub)} 失败: ${e.message}`); }
           }
-          catch(e) { log.error(`发送动态到 ${targetLabel(sub)} 失败: ${e.message}`); }
-          lastDynamics[uidStr] = latest.dynamicId;
         } else {
           log.bili(`[${sub.name || uidStr}] 无更新`);
         }
@@ -374,7 +451,7 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
         else delete lastLive[uidStr];
       } catch(e) { log.error('[' + (sub.name || uidStr) + '] 直播检测异常: ' + e.message); }
     }
-    try { fs.writeFileSync(LAST_FILE, JSON.stringify(lastDynamics, null, 2)); } catch(e) {}
+    saveLastDynamics();
     try { fs.writeFileSync(LAST_LIVE_FILE, JSON.stringify(lastLive, null, 2)); } catch(e) {}
   };
   check();
@@ -477,4 +554,4 @@ async function getCookieStatus() {
   return out;
 }
 
-function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, loadConfig, searchUp, getUpName, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, getCookieStatus, parseSessdataExpiry, fetchLatestDynamic, formatMsg, formatDynamicMd, formatLiveMsg, formatLiveMd, sendGroupCard, checkLive, CONFIG_FILE, COOKIE_FILE };
+function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, loadConfig, searchUp, getUpName, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, getCookieStatus, parseSessdataExpiry, isDynamicPushed, markDynamicPushed, recordPushedDynamic, shouldPushDynamic, fetchLatestDynamic, formatMsg, formatDynamicMd, formatLiveMsg, formatLiveMd, sendGroupCard, checkLive, CONFIG_FILE, COOKIE_FILE };

@@ -4,7 +4,7 @@
  */
 const axios = require('axios');
 const { registerCommand } = require('./commands');
-const { addSub, removeSub, listSub, searchUp, getUpName, saveBiliConfig, getApiStatus, fetchLatestDynamic, formatMsg, formatDynamicMd, sendGroupCard } = require('./bilibili');
+const { addSub, removeSub, listSub, searchUp, getUpName, saveBiliConfig, getApiStatus, fetchLatestDynamic, formatMsg, formatDynamicMd, sendGroupCard, isDynamicPushed, recordPushedDynamic } = require('./bilibili');
 const server = require('./server');
 const config = require('./config');
 const log = require('./logger');
@@ -351,14 +351,19 @@ registerCommand('bili_fetch', {
         const latest = await fetchLatestDynamic(sub.uid);
         if (!latest) {
           await proactiveSend(t, `⚠️ ${sub.name || sub.uid} 暂无动态`);
+        } else if (isDynamicPushed(sub.uid, latest.dynamicId)) {
+          // 已推送过的动态不再重发（监控推过或之前 fetch 过都算）
+          await proactiveSend(t, `⏭ ${sub.name || sub.uid} 的最新动态已推送过，不再重发\n🔗 ${latest.url}`);
         } else if (t.targetType === 'group') {
           // 群聊：图文合一 Markdown 卡片（失败自动退纯文本+分开发图）
           await sendGroupCard(t,
             await formatDynamicMd(latest, sub.name || String(sub.uid)),
             formatMsg(latest, sub.name || String(sub.uid)),
             latest.images);
+          recordPushedDynamic(sub.uid, latest);
         } else {
           await proactiveSend(t, formatMsg(latest, sub.name || String(sub.uid)));
+          recordPushedDynamic(sub.uid, latest);
         }
       } catch (e) {
         await proactiveSend(t, `❌ 获取 ${sub.name || sub.uid} 动态失败: ${e.message}`);

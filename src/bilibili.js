@@ -185,6 +185,18 @@ async function fetchDynamicDetail(dynamicId) {
   return { text };
 }
 
+/** 从动态流里挑「最新可推送」的条目：置顶和开播自动动态都不算新动态。
+ * 开播动态（DYNAMIC_TYPE_LIVE_RCMD）必须跳过：开播时直播检测已单独推过通知，
+ * 不跳的话动态监控过一会儿又推一遍 —— 就是"直播同步两条消息"的来源。 */
+function pickLatestItem(items) {
+  for (const item of items || []) {
+    if (item.modules?.module_tag?.text === '置顶') continue;
+    if (item.type === 'DYNAMIC_TYPE_LIVE_RCMD') continue;
+    return item;
+  }
+  return null;   // 全是置顶/开播动态 → 没有可推的
+}
+
 async function fetchOfficial(uid) {
   const url = `https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid=${uid}`;
   const res = await fetch(url, { headers: getHeaders(`https://space.bilibili.com/${uid}/dynamic`), signal: AbortSignal.timeout(8000) });
@@ -195,19 +207,45 @@ async function fetchOfficial(uid) {
   if (data.code === -799) throw new Error('请求过于频繁');
   if (data.code !== 0) throw new Error(`API错误: ${data.message}`);
   if (!data.data?.items?.length) return null;
-  // 跳过置顶动态，取第一条正常动态（如果 feed API 返回空内容，用 detail API 补全）
-  for (const item of data.data.items) {
-    if (item.modules?.module_tag?.text === '置顶') continue;
-    const parsed = parseDynamic(item);
-    if (!parsed.text && !parsed.title && parsed.images.length === 0) {
-      try {
-        const detail = await fetchDynamicDetail(parsed.dynamicId);
-        if (detail?.text) parsed.text = detail.text;
-      } catch(e) { /* ignore */ }
-    }
-    return parsed;
+  // 取第一条非置顶、非开播动态（文字/图片缺失时用 detail API 补全）
+  const item = pickLatestItem(data.data.items);
+  if (!item) return null;
+  const parsed = parseDynamic(item);
+  if (!parsed.text && !parsed.title && parsed.images.length === 0) {
+    try {
+      const detail = await fetchDynamicDetail(parsed.dynamicId);
+      if (detail?.text) parsed.text = detail.text;
+    } catch(e) { /* ignore */ }
   }
-  return data.data.items.length > 0 ? parseDynamic(data.data.items[0]) : null;
+  return parsed;
+}
+
+/** 解析 RSS XML 的 <item> 列表（逐条，不再用全文首匹配） */
+function parseRssItems(text) {
+  return [...String(text || '').matchAll(/<item>([\s\S]*?)<\/item>/g)].map(m => m[1]);
+}
+
+/** 从 RSS 条目里挑第一条「真动态」。
+ * 直播动态的链接是 live.bilibili.com/{房间号} 而非 t.bilibili.com/{动态id}
+ * （RSSHub 源码确认），开播通知已推过，跳过。
+ * 置顶动态 RSSHub 不做标记（源码确认原样放第一位），识别不了；
+ * 靠已推送基线的时间戳守卫兜底 —— 置顶必然比最新已推送的旧，会被拦截。 */
+function firstDynamicFromRss(text) {
+  for (const raw of parseRssItems(text)) {
+    const link = ((raw.match(/<link>([\s\S]*?)<\/link>/) || [])[1] || '').trim();
+    if (!link || /live\.bilibili\.com/i.test(link)) continue;
+    const title = (((raw.match(/<title>([\s\S]*?)<\/title>/) || [])[1]) || '')
+      .replace(/<!\[CDATA\[|\]\]>/g, '').trim();
+    const pubMatch = raw.match(/<pubDate>([\s\S]*?)<\/pubDate>/);
+    const dynId = link.split('/').pop().split('?')[0];
+    return {
+      dynamicId: dynId, uid: 0,
+      timestamp: pubMatch ? new Date(pubMatch[1]).getTime() / 1000 : Date.now() / 1000,
+      type: 'DYNAMIC_TYPE_UNKNOWN', text: title, images: [], title: '',
+      originInfo: null, url: link,
+    };
+  }
+  return null;   // 没有条目，或全是直播动态
 }
 
 /** 策略2: RSSHub（无需Cookie，但可能不稳定） */
@@ -217,18 +255,10 @@ async function fetchRSSHub(uid) {
       const url = `${inst}/bilibili/user/dynamic/${uid}`;
       const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/rss+xml' }, signal: AbortSignal.timeout(8000) });
       if (res.status !== 200) continue;
-      const text = await res.text();
-      const idMatch = text.match(/<guid[^>]*>([^<]+)/);
-      const titleMatch = text.match(/<title>([^<]+)/);
-      const linkMatch = text.match(/<link>([^<]+)/);
-      const pubMatch = text.match(/<pubDate>([^<]+)/);
-      if (!linkMatch) continue;
-      const dynId = idMatch ? idMatch[1].split('/').pop().split('?')[0] : linkMatch[1].split('/').pop().split('?')[0];
-      return {
-        dynamicId: dynId, uid: Number(uid), timestamp: pubMatch ? new Date(pubMatch[1]).getTime() / 1000 : Date.now() / 1000,
-        type: 'DYNAMIC_TYPE_UNKNOWN', text: (titleMatch?.[1] || '').trim(), images: [], title: titleMatch?.[1] || '',
-        originInfo: null, url: linkMatch[1],
-      };
+      const d = firstDynamicFromRss(await res.text());
+      if (d) { d.uid = Number(uid); return d; }
+      // 条目全是直播动态 → 没有可推的动态，换实例也是同样数据
+      return null;
     } catch(e) { continue; }
   }
   throw new Error('所有RSSHub实例不可用');
@@ -295,6 +325,7 @@ async function formatDynamicMd(d, upName) {
 /** 直播开播的 Markdown 卡片：封面内嵌。封面本就 16:9，不探测尺寸省一次网络。 */
 async function formatLiveMd(live, upName) {
   let md = `**🔴 ${mdEscape(upName)} 开播了！**\n`;
+  if (live.liveStartTime) md += `🕐 开播时间：${fmtTimeCN(live.liveStartTime)}\n`;
   if (live.area) md += `📺 直播分区：${mdEscape(live.area)}\n`;
   if (live.title) md += `📝 直播标题：${mdEscape(live.title)}\n`;
   const cover = await media.mdImageLine(live.cover, { probe: false });
@@ -341,18 +372,21 @@ async function checkLive(uid) {
     const d = data.data;
     // liveStatus: 0=未开播 1=正在直播 2=轮播中
     if (d.liveStatus !== 1) return null;
-    // 获取直播间详细信息（分区等）
+    // 获取直播间详细信息（分区、开播时间）
     let area = '';
+    let liveStartTime = 0;
     try {
       const infoUrl = 'https://api.live.bilibili.com/room/v1/Room/get_info?room_id=' + d.roomid;
       const infoRes = await fetch(infoUrl, { headers: getHeaders('https://live.bilibili.com/'), signal: AbortSignal.timeout(5000) });
       const infoData = await infoRes.json();
       area = infoData.data?.area_name || '';
+      liveStartTime = infoData.data?.live_start_time || 0;   // 开播时间（Unix秒，下播后归零）
     } catch(e) {}
     return {
       roomId: d.roomid,
       title: d.title || '直播中',
       area: area,
+      liveStartTime,
       cover: d.cover || '',
       url: d.url || ('https://live.bilibili.com/' + d.roomid),
     };
@@ -362,12 +396,42 @@ async function checkLive(uid) {
   }
 }
 
+function fmtTimeCN(ts) {
+  return new Date(ts * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+function fmtDuration(sec) {
+  const s = Math.max(0, Math.floor(sec));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h > 0) return h + ' 小时 ' + m + ' 分钟';
+  if (m > 0) return m + ' 分钟';
+  return s + ' 秒';
+}
+
 /** 格式化直播开播消息 */
 function formatLiveMsg(live, upName) {
   let msg = '🔴 ' + upName + ' 开播了！\n';
+  if (live.liveStartTime) msg += '🕐 开播时间：' + fmtTimeCN(live.liveStartTime) + '\n';
   if (live.area) msg += '📺 直播分区：' + live.area + '\n';
   if (live.title) msg += '📝 直播标题：' + live.title + '\n';
   msg += '\n🔗 ' + live.url;
+  return msg;
+}
+
+/** 下播通知：开始/结束时间 + 播了多久。
+ * startTs 缺失（中途重启没记录到开播时间）时只报结束时间，不猜时长。 */
+function formatLiveEndMsg(startTs, upName, title) {
+  const endTs = Math.floor(Date.now() / 1000);
+  let msg = '⚪️ ' + upName + ' 下播了\n';
+  if (startTs > 0) {
+    msg += '🕐 开始：' + fmtTimeCN(startTs) + '\n';
+    msg += '🔚 结束：' + fmtTimeCN(endTs) + '\n';
+    msg += '⏱ 时长：' + fmtDuration(endTs - startTs) + '\n';
+  } else {
+    msg += '🔚 结束：' + fmtTimeCN(endTs) + '\n';
+  }
+  if (title) msg += '📝 本场直播：' + title + '\n';
   return msg;
 }
 
@@ -379,6 +443,12 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
   try {
     if (fs.existsSync(LAST_LIVE_FILE)) lastLive = JSON.parse(fs.readFileSync(LAST_LIVE_FILE, 'utf-8'));
   } catch(e) {}
+  // 旧格式只存房间号（数字）；升级为 {roomId, startTime, title} 以支持下播时长统计
+  for (const k of Object.keys(lastLive)) {
+    if (typeof lastLive[k] !== 'object' || lastLive[k] === null) {
+      lastLive[k] = { roomId: lastLive[k], startTime: 0, title: '' };
+    }
+  }
   const check = async () => {
     const subs = loadConfig();
     for (const sub of subs) {
@@ -445,9 +515,25 @@ function startMonitor(bot, intervalMinutes = 5, sendFn = null) {
             } catch(e) { log.error('发送直播通知失败: ' + e.message); }
           }
         } else if (!live && lastLive[uidStr]) {
-          log.bili('[' + (sub.name || uidStr) + '] 下播');
+          // 下播：补一条开始/结束时间、播了多久（开播时间取开播时记录的）
+          const prev = lastLive[uidStr];
+          log.bili('[' + (sub.name || uidStr) + '] 下播: ' + (prev.title || ''));
+          const _send = sendFn || (bot && bot.send && bot.send.channel ? (t, text) => bot.send.channel(t.targetId, text) : null);
+          if (_send) {
+            try {
+              await _send(sub, formatLiveEndMsg(prev.startTime || 0, sub.name || uidStr, prev.title || ''));
+            } catch(e) { log.error('发送下播通知失败: ' + e.message); }
+          }
         }
-        if (live) lastLive[uidStr] = live.roomId;
+        if (live) {
+          const prev = lastLive[uidStr] || {};
+          lastLive[uidStr] = {
+            roomId: live.roomId,
+            // API 没给开播时间时退而用检测时刻近似（误差≤一个轮询周期）
+            startTime: live.liveStartTime || prev.startTime || Math.floor(Date.now() / 1000),
+            title: live.title || prev.title || '',
+          };
+        }
         else delete lastLive[uidStr];
       } catch(e) { log.error('[' + (sub.name || uidStr) + '] 直播检测异常: ' + e.message); }
     }
@@ -554,4 +640,4 @@ async function getCookieStatus() {
   return out;
 }
 
-function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, loadConfig, searchUp, getUpName, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, getCookieStatus, parseSessdataExpiry, isDynamicPushed, markDynamicPushed, recordPushedDynamic, shouldPushDynamic, fetchLatestDynamic, formatMsg, formatDynamicMd, formatLiveMsg, formatLiveMd, sendGroupCard, checkLive, CONFIG_FILE, COOKIE_FILE };
+function getApiStatus() { return { hasCookie: !!biliConfig.cookie, message: biliConfig.cookie ? "Cookie已配置" : "未配置Cookie，将使用第三方API" }; } function setCookie(cookie) { saveBiliConfig(cookie); } module.exports = { startMonitor, addSub, removeSub, listSub, loadConfig, searchUp, getUpName, loadBiliConfig, saveBiliConfig, setCookie, getApiStatus, getCookieStatus, parseSessdataExpiry, isDynamicPushed, markDynamicPushed, recordPushedDynamic, shouldPushDynamic, pickLatestItem, parseRssItems, firstDynamicFromRss, fmtDuration, fetchLatestDynamic, formatMsg, formatDynamicMd, formatLiveMsg, formatLiveMd, formatLiveEndMsg, sendGroupCard, checkLive, CONFIG_FILE, COOKIE_FILE };
